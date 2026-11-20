@@ -1,0 +1,138 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/inter';
+
+@theme {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  --color-navy-950: #050d1f;
+  --color-navy-900: #0a1a3a;
+  --color-navy-800: #0f2550;
+  --color-navy-700: #173069;
+  --color-navy-600: #1f3d84;
+  --color-navy-500: #2a4fa3;
+  --color-navy-300: #8fa3cc;
+  --color-navy-200: #c3cfe6;
+  --color-navy-100: #e3e9f5;
+  --color-navy-50: #f1f4fa;
+
+  --color-brand-700: #1a43c0;
+  --color-brand-600: #1d4ed8;
+  --color-brand-500: #2563eb;
+  --color-brand-100: #dbe6ff;
+  --color-brand-50: #eef3ff;
+
+  --color-canvas: #f4f6fb;
+  --color-line: #e3e8f1;
+  --color-ink: #0b1730;
+  --color-muted: #5a6a86;
+  --color-subtle: #8a98b1;
+
+  --color-free: #16a34a;
+  --color-moderate: #eab308;
+  --color-heavy: #f97316;
+  --color-jam: #dc2626;
+
+  --shadow-card: 0 1px 2px rgb(10 26 58 / 0.04), 0 1px 3px rgb(10 26 58 / 0.06);
+  --shadow-pop: 0 10px 30px -10px rgb(10 26 58 / 0.25);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.vehicle-dot {
+  transition: transform 250ms linear;
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.pulse-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulse-ring 1.4s ease-out infinite;
+}
+
+@keyframes dash-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+.green-wave {
+  stroke-dasharray: 8 4;
+  animation: dash-flow 0.8s linear infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.blink {
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: #e8edf5;
+}
+
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.6), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vehicle-dot,
+  .pulse-ring,
+  .green-wave,
+  .blink,
+  .skeleton::after {
+    animation: none;
+    transition: none;
+  }
+}
+
+input[type='range'] {
+  accent-color: var(--color-brand-600);
+}
+
+::selection {
+  background: var(--color-brand-100);
+}
