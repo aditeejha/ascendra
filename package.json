@@ -1,0 +1,50 @@
+{
+  "name": "ascendra",
+  "version": "1.0.0",
+  "description": "ASCENDRA - Smart Traffic Intelligence & City Traffic Control Platform",
+  "private": true,
+  "type": "module",
+  "author": "Aditee Jha, Sumedha Dubey",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,cyan \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch --clear-screen=false server/index.ts",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "tsx server/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "vitest run",
+    "train:rl": "tsx scripts/train-rl.ts",
+    "sim:history": "tsx scripts/generate-history.ts",
+    "train:forecaster": "python ml/train_forecaster.py",
+    "evaluate": "tsx scripts/evaluate.ts"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
+    "clsx": "^2.1.1",
+    "express": "^5.3.0",
+    "lucide-react": "^1.77.0",
+    "pg": "^8.23.1",
+    "pg-mem": "^3.0.14",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router-dom": "^7.18.6",
+    "recharts": "^3.11.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}

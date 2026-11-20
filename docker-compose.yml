@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ascendra
+      POSTGRES_PASSWORD: ascendra
+      POSTGRES_DB: ascendra
+    ports:
+      - '5432:5432'
+    volumes:
+      - ascendra-data:/var/lib/postgresql/data
+
+volumes:
+  ascendra-data:
