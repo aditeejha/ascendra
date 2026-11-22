@@ -488,6 +488,51 @@ export interface ReplayStatus {
   accuracy: { n: number; mae15: number | null; maePersistence15: number | null; situationAcc15: number | null };
 }
 
+export interface DatasetPredictionRow {
+  row: number;
+  dayNumber: number;
+  weekday: string;
+  clock: string;
+  car: number;
+  bike: number;
+  heavy: number;
+  total: number;
+  label: JunctionSituation | null;
+  situationNow: JunctionSituation;
+  count15: number;
+  actual15: number | null;
+  situation15: JunctionSituation;
+  label15: JunctionSituation | null;
+  count30: number;
+  actual30: number | null;
+  situation30: JunctionSituation;
+  label30: JunctionSituation | null;
+}
+
+export interface CountScore {
+  n: number;
+  mae: number;
+  maePersistence: number;
+}
+
+export interface SituationScore {
+  n: number;
+  accuracy: number;
+  accuracyPersistence: number | null;
+}
+
+export interface DatasetPredictions {
+  dataset: string;
+  rows: number;
+  count15: CountScore | null;
+  count30: CountScore | null;
+  situationNow: SituationScore | null;
+  situation15: SituationScore | null;
+  situation30: SituationScore | null;
+  chart: { row: number; label: string; actual: number; predicted: number | null }[];
+  page: { offset: number; limit: number; rows: DatasetPredictionRow[] };
+}
+
 export interface WeatherReading {
   temperatureC: number;
   precipitationMm: number;

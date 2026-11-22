@@ -1,10 +1,20 @@
-import type { JunctionSituation, ReplayPoint, ReplayStatus, ReplaySummary } from '../../shared/types';
+import type {
+  CountScore,
+  DatasetPredictionRow,
+  DatasetPredictions,
+  JunctionSituation,
+  ReplayPoint,
+  ReplayStatus,
+  ReplaySummary,
+  SituationScore,
+} from '../../shared/types';
 import type { JunctionForecaster } from '../sim/junction';
 import type { Simulation } from '../sim/engine';
 import { DAY_NAMES } from '../sim/demand';
 
 export interface DatasetRow {
   minute: number;
+  day: number;
   dow: number;
   car: number;
   bike: number;
@@ -16,6 +26,8 @@ export interface DatasetRow {
 
 const SITUATIONS: JunctionSituation[] = ['low', 'normal', 'high', 'heavy'];
 const MAX_ROWS = 60_000;
+const CHART_POINTS = 600;
+const PREDICT_CHUNK = 2000;
 
 function splitCsvLine(line: string): string[] {
   const out: string[] = [];
@@ -104,6 +116,7 @@ export function parseTrafficCsv(text: string): { rows: DatasetRow[]; warnings: s
     const label = col.situation >= 0 ? ((cells[col.situation] ?? '').trim().toLowerCase() as JunctionSituation) : null;
     rows.push({
       minute,
+      day: dayCounter,
       dow: dowFromName >= 0 ? dowFromName : dayCounter % 7,
       car,
       bike,
@@ -121,6 +134,125 @@ function clock(minute: number): string {
   return `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
 }
 
+export function datasetFeatures(rows: DatasetRow[], i: number): number[] {
+  const r = rows[i];
+  const tot = (k: number) => rows[Math.max(0, i - k)].total;
+  const last4 = [tot(0), tot(1), tot(2), tot(3)];
+  const mean4 = last4.reduce((a, v) => a + v, 0) / 4;
+  const std4 = Math.sqrt(last4.reduce((a, v) => a + (v - mean4) ** 2, 0) / 3);
+  const heavy = r.bus + r.truck;
+  const angle = (r.minute / 1440) * Math.PI * 2;
+  return [r.car, r.bike, heavy, r.total, tot(1), tot(2), tot(3), tot(4), mean4, std4, r.total - tot(1), r.total ? heavy / r.total : 0, r.total ? r.bike / r.total : 0, Math.sin(angle), Math.cos(angle), r.dow, r.dow >= 5 ? 1 : 0];
+}
+
+export async function predictRows(model: JunctionForecaster, rows: DatasetRow[]): Promise<DatasetPredictionRow[]> {
+  const out: DatasetPredictionRow[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (i && i % PREDICT_CHUNK === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    const r = rows[i];
+    const x = datasetFeatures(rows, i);
+    const next = rows[i + 1];
+    const after = rows[i + 2];
+    out.push({
+      row: i + 1,
+      dayNumber: r.day + 1,
+      weekday: DAY_NAMES[r.dow],
+      clock: clock(r.minute),
+      car: r.car,
+      bike: r.bike,
+      heavy: r.bus + r.truck,
+      total: r.total,
+      label: r.situation,
+      situationNow: model.situation(0, x).label,
+      count15: Math.round(model.count(15, x)),
+      actual15: next?.total ?? null,
+      situation15: model.situation(15, x).label,
+      label15: next?.situation ?? null,
+      count30: Math.round(model.count(30, x)),
+      actual30: after?.total ?? null,
+      situation30: model.situation(30, x).label,
+      label30: after?.situation ?? null,
+    });
+  }
+  return out;
+}
+
+function scoreCounts(rows: DatasetPredictionRow[], horizon: 15 | 30): CountScore | null {
+  let n = 0;
+  let err = 0;
+  let base = 0;
+  for (const r of rows) {
+    const actual = horizon === 15 ? r.actual15 : r.actual30;
+    if (actual === null) continue;
+    n++;
+    err += Math.abs((horizon === 15 ? r.count15 : r.count30) - actual);
+    base += Math.abs(r.total - actual);
+  }
+  return n ? { n, mae: Math.round((err / n) * 10) / 10, maePersistence: Math.round((base / n) * 10) / 10 } : null;
+}
+
+function scoreSituations(rows: DatasetPredictionRow[], horizon: 0 | 15 | 30): SituationScore | null {
+  let n = 0;
+  let hit = 0;
+  let kept = 0;
+  for (const r of rows) {
+    const truth = horizon === 0 ? r.label : horizon === 15 ? r.label15 : r.label30;
+    if (!truth) continue;
+    n++;
+    if ((horizon === 0 ? r.situationNow : horizon === 15 ? r.situation15 : r.situation30) === truth) hit++;
+    if (r.label === truth) kept++;
+  }
+  if (!n) return null;
+  return { n, accuracy: Math.round((hit / n) * 1000) / 1000, accuracyPersistence: horizon ? Math.round((kept / n) * 1000) / 1000 : null };
+}
+
+export function predictionReport(dataset: string, rows: DatasetPredictionRow[], offset: number, limit: number): DatasetPredictions {
+  const step = Math.max(1, Math.ceil(rows.length / CHART_POINTS));
+  const chart: DatasetPredictions['chart'] = [];
+  for (let i = 0; i < rows.length; i += step) {
+    const r = rows[i];
+    chart.push({ row: r.row, label: `Day ${r.dayNumber} ${r.clock}`, actual: r.total, predicted: i ? rows[i - 1].count15 : null });
+  }
+  return {
+    dataset,
+    rows: rows.length,
+    count15: scoreCounts(rows, 15),
+    count30: scoreCounts(rows, 30),
+    situationNow: scoreSituations(rows, 0),
+    situation15: scoreSituations(rows, 15),
+    situation30: scoreSituations(rows, 30),
+    chart,
+    page: { offset, limit, rows: rows.slice(offset, offset + limit) },
+  };
+}
+
+const CSV_COLUMNS: [string, (r: DatasetPredictionRow) => string | number | null][] = [
+  ['row', (r) => r.row],
+  ['day', (r) => r.dayNumber],
+  ['weekday', (r) => r.weekday],
+  ['time', (r) => r.clock],
+  ['cars', (r) => r.car],
+  ['two_wheelers', (r) => r.bike],
+  ['buses_trucks', (r) => r.heavy],
+  ['total', (r) => r.total],
+  ['situation_label', (r) => r.label],
+  ['model_situation_now', (r) => r.situationNow],
+  ['predicted_total_15min', (r) => r.count15],
+  ['actual_total_15min', (r) => r.actual15],
+  ['predicted_situation_15min', (r) => r.situation15],
+  ['actual_situation_15min', (r) => r.label15],
+  ['predicted_total_30min', (r) => r.count30],
+  ['actual_total_30min', (r) => r.actual30],
+  ['predicted_situation_30min', (r) => r.situation30],
+  ['actual_situation_30min', (r) => r.label30],
+];
+
+export function predictionsCsv(rows: DatasetPredictionRow[]): string {
+  const lines = [CSV_COLUMNS.map(([name]) => name).join(',')];
+  for (const r of rows) lines.push(CSV_COLUMNS.map(([, pick]) => pick(r) ?? '').join(','));
+  return lines.join('\n') + '\n';
+}
+
 export class Replay {
   name: string | null = null;
   rows: DatasetRow[] = [];
@@ -134,8 +266,16 @@ export class Replay {
   private history: ReplayPoint[] = [];
   private preds = new Map<number, { count15: number; count30: number; sit15: JunctionSituation; sit30: JunctionSituation }>();
   private errs: { model: number; base: number; sitHit: number | null }[] = [];
+  private predicted: { rows: DatasetRow[]; result: Promise<DatasetPredictionRow[]> } | null = null;
 
   constructor(private model: () => JunctionForecaster | null) {}
+
+  predictAll(): Promise<DatasetPredictionRow[]> | null {
+    const m = this.model();
+    if (!m || !this.rows.length) return null;
+    if (this.predicted?.rows !== this.rows) this.predicted = { rows: this.rows, result: predictRows(m, this.rows) };
+    return this.predicted.result;
+  }
 
   load(name: string, text: string): ReplaySummary {
     const { rows, warnings } = parseTrafficCsv(text);
@@ -213,17 +353,6 @@ export class Replay {
     return false;
   }
 
-  private features(i: number): number[] {
-    const r = this.rows[i];
-    const tot = (k: number) => this.rows[Math.max(0, i - k)].total;
-    const last4 = [tot(0), tot(1), tot(2), tot(3)];
-    const mean4 = last4.reduce((a, v) => a + v, 0) / 4;
-    const std4 = Math.sqrt(last4.reduce((a, v) => a + (v - mean4) ** 2, 0) / 3);
-    const heavy = r.bus + r.truck;
-    const angle = (r.minute / 1440) * Math.PI * 2;
-    return [r.car, r.bike, heavy, r.total, tot(1), tot(2), tot(3), tot(4), mean4, std4, r.total - tot(1), r.total ? heavy / r.total : 0, r.total ? r.bike / r.total : 0, Math.sin(angle), Math.cos(angle), r.dow, r.dow >= 5 ? 1 : 0];
-  }
-
   private record(): void {
     const i = this.index;
     const r = this.rows[i];
@@ -232,7 +361,7 @@ export class Replay {
     const made30 = this.preds.get(i - 2);
     let now: JunctionSituation | null = null;
     if (m) {
-      const x = this.features(i);
+      const x = datasetFeatures(this.rows, i);
       now = m.situation(0, x).label;
       this.preds.set(i, { count15: Math.round(m.count(15, x)), count30: Math.round(m.count(30, x)), sit15: m.situation(15, x).label, sit30: m.situation(30, x).label });
       this.preds.delete(i - 3);

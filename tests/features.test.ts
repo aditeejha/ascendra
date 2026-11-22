@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parseTrafficCsv, Replay } from '../server/live/replay';
+import { datasetFeatures, parseTrafficCsv, predictionReport, predictionsCsv, predictRows, Replay } from '../server/live/replay';
 import { Simulation } from '../server/sim/engine';
 import { loadJunctionModel } from '../server/sim/models';
 import { buildNetwork, distanceM } from '../server/sim/network';
@@ -103,6 +103,42 @@ describe('dataset replay', () => {
     expect(rows[0].car + rows[0].bike + rows[0].bus + rows[0].truck).toBe(120);
     expect(warnings.length).toBeGreaterThan(0);
     expect(() => parseTrafficCsv('a,b\n1,2\n3,4')).toThrow(/time column/i);
+  });
+
+  it('predicts every row of an uploaded dataset and lines each forecast up with what came next', async () => {
+    const model = loadJunctionModel()!;
+    const lines = Array.from({ length: 12 }, (_, i) => {
+      const time = `${8 + Math.floor(i / 4)}:${String((i % 4) * 15).padStart(2, '0')}:00 AM`;
+      return `${time},Monday,${60 + i * 5},${20 + i},5,8,${93 + i * 6},${i < 6 ? 'normal' : 'heavy'}`;
+    });
+    const csv = ['Time,Day of the week,CarCount,BikeCount,BusCount,TruckCount,Total,Traffic Situation', ...lines].join('\n');
+    const { rows } = parseTrafficCsv(csv);
+    const predicted = await predictRows(model, rows);
+    expect(predicted).toHaveLength(12);
+    expect(predicted[0].count15).toBe(Math.round(model.count(15, datasetFeatures(rows, 0))));
+    expect(predicted[3]).toMatchObject({ row: 4, dayNumber: 1, weekday: 'Monday', clock: '08:45', actual15: rows[4].total, actual30: rows[5].total, label15: 'normal' });
+    expect(predicted[11]).toMatchObject({ actual15: null, actual30: null, label15: null, label30: null });
+
+    const report = predictionReport('test.csv', predicted, 10, 5);
+    expect(report.count15!.n).toBe(11);
+    expect(report.count30!.n).toBe(10);
+    expect(report.situationNow!.n).toBe(12);
+    expect(report.situation15!.accuracyPersistence).toBe(0.909);
+    expect(report.page.rows.map((r) => r.row)).toEqual([11, 12]);
+    expect(report.chart).toHaveLength(12);
+
+    const out = predictionsCsv(predicted).trim().split('\n');
+    expect(out).toHaveLength(13);
+    expect(out[0].split(',')).toContain('predicted_total_15min');
+    expect(out[12].split(',')[11]).toBe('');
+
+    const replay = new Replay(() => model);
+    replay.load('a.csv', csv);
+    const first = replay.predictAll();
+    expect(replay.predictAll()).toBe(first);
+    replay.load('b.csv', csv);
+    expect(replay.predictAll()).not.toBe(first);
+    expect(new Replay(() => null).predictAll()).toBeNull();
   });
 
   it.runIf(existsSync('ml/data/kaggle-traffic/TrafficTwoMonth.csv'))('drives the simulation from the dataset and scores the forecasts', () => {

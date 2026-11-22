@@ -88,7 +88,8 @@ The current situation is classified with 92.9% accuracy (macro F1 0.90). The mid
 | Civic reports with photos: potholes, accidents, waterlogging and more. The authority verifies, assigns a crew, starts work and marks it fixed with a proof photo. The citizen confirms and rates the fix, or reopens it. Deadlines follow severity (24, 72 or 168 hours). Verified reports slow or close the road in the simulation | Civic Reports, Authority Desk |
 | Citizen and vehicle registration: plate, class, owner name, phone, email, licence number, address and photo. Other citizens never see someone's contact details | Vehicle Registry |
 | Authority desk: everyone registered with photo and details, searchable by name, phone, plate or licence; civic cases with deadlines; overspeeding linked to owners with e-challans; emergency dispatches | Authority Desk |
-| Data replay: upload a traffic-count CSV, or use the Kaggle sample, and the city runs on it at 16–128× speed. Forecasts made 15 minutes earlier are scored against the real counts as they arrive | Data Replay |
+| Dataset predictions: upload a traffic-count CSV from the dashboard or Data Replay, and the junction model predicts the vehicle count and traffic situation 15 and 30 minutes ahead for every row at once. Each forecast is scored against the rows that follow, shown in a chart and a paged table, and downloadable as CSV | Dashboard, Data Replay |
+| Data replay: the same file, or the Kaggle sample, drives the city at 16–128× speed. Forecasts made 15 minutes earlier are scored against the real counts as they arrive | Data Replay |
 | Overspeed detection from speed cameras, with e-challans | Overspeeding |
 | Live sources panel, live clock and weather switches, audit log | Settings |
 
@@ -157,7 +158,7 @@ npm start
 
 ## Replaying a dataset
 
-Open **Data Replay** as the Traffic Controller or Traffic Authority, upload a CSV (up to 6 MB), choose a speed and press Start. The file needs a time column (`08:15` or `8:15:00 AM`) and either per-class counts or a total. Recognised columns:
+As the Traffic Controller or Traffic Authority, press **Upload dataset** on the dashboard or open **Data Replay** and upload a CSV (up to 6 MB). The model predicts every row straight away: the page shows its accuracy, a chart and a table of every row, and **Download all (CSV)** saves the predictions with the actual values next to them. To run the city on the file, choose a speed and press Start. The file needs a time column (`08:15` or `8:15:00 AM`) and either per-class counts or a total. Recognised columns:
 
 | Column | Example header | Required |
 |---|---|---|

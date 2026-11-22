@@ -21,9 +21,10 @@ import { Link } from 'react-router-dom';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { AnalyticsLive, FeedEvent, ForecastResponse, NetworkInfo, SignalDetail, Snapshot } from '../../../shared/types';
 import { CityMap, MapLegend, MapSkeleton } from '../components/CityMap';
+import { DatasetUploadButton } from '../components/DatasetUpload';
 import { JunctionOutlookCard } from '../components/JunctionOutlook';
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, LevelBadge, PageHeader, Segmented, Skeleton, SkeletonGroup, Stat } from '../components/ui';
-import { scoreColor, linkLabel, pct } from '../lib/format';
+import { num, scoreColor, linkLabel, pct } from '../lib/format';
 import { usePoll } from '../lib/hooks';
 import { useLive } from '../lib/live';
 import { useRole } from '../lib/role';
@@ -89,12 +90,17 @@ export function DashboardPage() {
         title="City operations"
         description={`Live view of ${network.meta.city}'s real road network on ${snap.day}. Signals adapt in real time, congestion is forecast 15–30 minutes ahead and emergency vehicles get green waves.`}
         actions={
-          can('map') ? (
-            <Link to="/map">
-              <Button variant="secondary" icon={ArrowRight}>
-                Open live map
-              </Button>
-            </Link>
+          can('map') || can('replay') ? (
+            <div className="flex flex-wrap gap-2">
+              {can('replay') && <DatasetUploadButton />}
+              {can('map') && (
+                <Link to="/map">
+                  <Button variant="secondary" icon={ArrowRight}>
+                    Open live map
+                  </Button>
+                </Link>
+              )}
+            </div>
           ) : null
         }
       />
@@ -340,20 +346,38 @@ function AlertsCard({ events, loading }: { events: FeedEvent[] | null; loading: 
 }
 
 function HotspotsCard({ network, forecast, loading }: { network: NetworkInfo; forecast: ForecastResponse | null; loading: boolean }) {
+  const quiet = !forecast?.hotspots.length;
+  const rows = useMemo(() => {
+    if (!forecast) return [];
+    if (forecast.hotspots.length) return forecast.hotspots.slice(0, 5);
+    return [...forecast.links]
+      .sort((a, b) => Math.max(b.h15, b.h30) - Math.max(a.h15, a.h30))
+      .slice(0, 5)
+      .map((l) => ({ linkId: l.linkId, toName: network.nodes[network.links[l.linkId].to].name, now: l.now, h15: l.h15, h30: l.h30, conf: l.conf15 }));
+  }, [forecast, network]);
   return (
     <Card>
-      <CardHeader title="Predicted hotspots" icon={Brain} subtitle={forecast?.model.available ? `${forecast.model.name} · updated ${forecast.clock}` : 'Forecast model not loaded'} />
+      <CardHeader
+        title="Predicted hotspots"
+        icon={Brain}
+        subtitle={forecast?.model.available ? `${forecast.model.name} · ${num(forecast.links.length)} roads forecast · updated ${forecast.clock}` : 'Forecast model not loaded'}
+      />
       {loading && !forecast ? (
         <SkeletonGroup label="Loading forecast" className="space-y-3 p-5">
           {Array.from({ length: 4 }, (item, i) => (
             <Skeleton key={i} className="h-10 w-full" />
           ))}
         </SkeletonGroup>
-      ) : !forecast?.hotspots.length ? (
-        <EmptyState icon={Sparkles} title="No hotspots ahead" description="Every link is forecast to stay free-flowing for the next 30 minutes." />
+      ) : !rows.length ? (
+        <EmptyState icon={Sparkles} title="Forecast model not loaded" description="Run npm run sim:history and npm run train:forecaster, then restart the server." />
       ) : (
         <ul className="divide-y divide-line">
-          {forecast.hotspots.slice(0, 5).map((h) => (
+          {quiet && (
+            <li className="bg-navy-50/60 px-5 py-2.5 text-xs text-muted">
+              No road is forecast to build up in the next 30 minutes. These are the highest predicted loads.
+            </li>
+          )}
+          {rows.map((h) => (
             <li key={h.linkId} className="px-5 py-3">
               <div className="flex items-center justify-between gap-2">
                 <p className="truncate text-[13px] font-semibold text-ink">{linkLabel(network, network.links[h.linkId])}</p>

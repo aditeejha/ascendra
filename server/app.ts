@@ -22,7 +22,7 @@ import type { Repo } from './repo';
 import type { Simulation } from './sim/engine';
 import { runEvaluation } from './sim/evaluation';
 import type { Forecaster } from './sim/forecaster';
-import type { Replay } from './live/replay';
+import { predictionReport, predictionsCsv, type Replay } from './live/replay';
 import type { JunctionForecaster } from './sim/junction';
 import { saveJson } from './sim/models';
 import { publicNetwork, type Network } from './sim/network';
@@ -604,6 +604,41 @@ export function createApp(ctx: AppContext) {
     res.json(ctx.replay.status());
   });
 
+  const datasetPredictions = async (res: Response) => {
+    if (!ctx.replay.name || !ctx.replay.rows.length) {
+      res.status(404).json({ error: 'Upload a dataset first.' });
+      return null;
+    }
+    const name = ctx.replay.name;
+    const pending = ctx.replay.predictAll();
+    if (!pending) {
+      res.status(409).json({ error: 'The junction model is not trained. Run npm run train:junction.' });
+      return null;
+    }
+    return { name, rows: await pending };
+  };
+
+  app.get('/api/replay/predictions', async (req, res) => {
+    const { offset, limit } = z
+      .object({ offset: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(200).default(50) })
+      .parse(req.query);
+    const result = await datasetPredictions(res);
+    if (result) res.json(predictionReport(result.name, result.rows, offset, limit));
+  });
+
+  app.get('/api/replay/predictions.csv', async (req, res) => {
+    const result = await datasetPredictions(res);
+    if (!result) return;
+    const base =
+      result.name
+        .replace(/\.csv\b/gi, '')
+        .replace(/[^\w]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || 'dataset';
+    res.attachment(`${base}-predictions.csv`);
+    res.type('text/csv').send(predictionsCsv(result.rows));
+  });
+
   const datasetSchema = z.object({ name: z.string().trim().min(1).max(120), csv: z.string().min(10).max(6_000_000) });
 
   app.post('/api/replay/dataset', allow('controller', 'authority'), async (req, res) => {
@@ -617,6 +652,7 @@ export function createApp(ctx: AppContext) {
       return;
     }
     if (wasActive) await ctx.stopReplay();
+    void ctx.replay.predictAll();
     await audit(req, 'upload_dataset', 'dataset', null, { name: body.name, rows: summary.rows });
     res.status(201).json(ctx.replay.status());
   });
@@ -630,6 +666,7 @@ export function createApp(ctx: AppContext) {
     const wasActive = ctx.replay.running || ctx.sim.demandOverridden;
     ctx.replay.load('Kaggle Traffic Prediction Dataset (TrafficTwoMonth.csv)', readFileSync(file, 'utf8'));
     if (wasActive) await ctx.stopReplay();
+    void ctx.replay.predictAll();
     await audit(req, 'upload_dataset', 'dataset', null, { name: 'kaggle-sample' });
     res.status(201).json(ctx.replay.status());
   });

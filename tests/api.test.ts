@@ -8,12 +8,14 @@ import { connectDb } from '../server/db';
 import { Repo } from '../server/repo';
 import { Simulation } from '../server/sim/engine';
 import type { LiveStatus } from '../shared/types';
+import { loadJunctionModel } from '../server/sim/models';
 import { buildNetwork, distanceM } from '../server/sim/network';
 
 let server: Server;
 let base: string;
 let ctx: AppContext;
 const net = buildNetwork();
+const junction = loadJunctionModel();
 const signalNode = net.nodes.find((n) => n.signal)!.id;
 const hospital = net.stations[0];
 const destination = net.nodes.find((n) => distanceM(net, hospital, n.id) > 1500)!.id;
@@ -52,7 +54,7 @@ beforeAll(async () => {
     liveStatus: () => ({ city: { name: 'Test City' }, traffic: { status: 'no_key' }, weather: { mode: 'manual' } }) as LiveStatus,
     resync: async () => {},
     applyLiveWeather: () => {},
-    replay: new Replay(() => null),
+    replay: new Replay(() => junction),
     startReplay: async () => {},
     stopReplay: async () => {},
   };
@@ -190,5 +192,29 @@ describe('citizen registration', () => {
     const photo = await fetch(`${base}/api/vehicles/${created.body.id}/photo?role=authority`);
     expect(photo.status).toBe(200);
     expect(photo.headers.get('content-type')).toBe('image/png');
+  });
+});
+
+describe('dataset predictions', () => {
+  it('predicts every row of an uploaded file, pages the results and serves them as CSV', async () => {
+    expect((await call('/replay/predictions', 'controller')).status).toBe(404);
+    const rows = Array.from({ length: 8 }, (_, i) => `${8 + Math.floor(i / 4)}:${String((i % 4) * 15).padStart(2, '0')},${100 + i * 10}`);
+    const csv = ['Time,Total', ...rows].join('\n');
+    expect((await call('/replay/dataset', 'citizen', 'POST', { name: 'counts.csv', csv })).status).toBe(403);
+    expect((await call('/replay/dataset', 'controller', 'POST', { name: 'counts.csv', csv })).status).toBe(201);
+
+    const page = await call('/replay/predictions?offset=2&limit=3', 'controller');
+    expect(page.status).toBe(200);
+    expect(page.body).toMatchObject({ dataset: 'counts.csv', rows: 8, situation15: null });
+    expect(page.body.count15.n).toBe(7);
+    expect(page.body.page.rows.map((r: { row: number }) => r.row)).toEqual([3, 4, 5]);
+    expect(page.body.page.rows[0].actual15).toBe(130);
+    expect((await call('/replay/predictions?limit=500', 'controller')).status).toBe(400);
+
+    const file = await fetch(`${base}/api/replay/predictions.csv?role=authority`);
+    expect(file.status).toBe(200);
+    expect(file.headers.get('content-type')).toContain('text/csv');
+    expect(file.headers.get('content-disposition')).toContain('counts-predictions.csv');
+    expect((await file.text()).trim().split('\n')).toHaveLength(9);
   });
 });

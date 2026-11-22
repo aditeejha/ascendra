@@ -3,6 +3,8 @@ import { useRef, useState } from 'react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { ReplayStatus } from '../../../shared/types';
 import { CityMap, MapLegend, MapSkeleton } from '../components/CityMap';
+import { DatasetPredictionsCard } from '../components/DatasetPredictions';
+import { DatasetUploadButton, useDatasetUpload } from '../components/DatasetUpload';
 import { SituationBadge } from '../components/JunctionOutlook';
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, PageHeader, ProgressBar, Segmented, Skeleton, SkeletonGroup, Stat } from '../components/ui';
 import { api } from '../lib/api';
@@ -38,14 +40,9 @@ export function ReplayPage() {
     }
   };
 
+  const { upload: sendDataset, uploading } = useDatasetUpload((next) => status.setData(next));
   const upload = async (file: File | undefined) => {
-    if (!file) return;
-    if (file.size > 6_000_000) {
-      toast('error', 'The file is larger than 6 MB.');
-      return;
-    }
-    const csv = await file.text();
-    await call('upload', '/replay/dataset', { name: file.name, csv }, `${file.name} loaded.`);
+    await sendDataset(file);
     if (fileRef.current) fileRef.current.value = '';
   };
 
@@ -56,8 +53,18 @@ export function ReplayPage() {
     <div>
       <PageHeader
         title="Data replay"
-        description="Upload a traffic-count dataset and ASCENDRA plays it through the city: each 15-minute row sets how much traffic there is and its mix of cars, two-wheelers, buses and trucks, while the XGBoost model forecasts the next 15 and 30 minutes and is scored against what the data shows next. Every other feature keeps working on the replayed traffic."
+        description="Upload a traffic-count dataset and the XGBoost junction model predicts the vehicle count and traffic situation 15 and 30 minutes ahead for every row straight away, scored against what the data shows next and downloadable as CSV. You can also replay it through the city: each 15-minute row sets how much traffic there is and its mix of cars, two-wheelers, buses and trucks, and every other feature responds."
       />
+
+      {s?.dataset && (
+        <div className="mb-6">
+          <DatasetPredictionsCard
+            key={s.dataset.uploadedAt}
+            dataset={s.dataset}
+            extraActions={canRun ? <DatasetUploadButton label="Upload another file" variant="secondary" size="sm" onLoaded={(next) => status.setData(next)} /> : undefined}
+          />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
         <div className="space-y-6">
@@ -68,9 +75,9 @@ export function ReplayPage() {
                 <>
                   <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-navy-200 bg-navy-50/60 px-4 py-6 text-center text-sm font-medium text-navy-700 hover:bg-navy-50">
                     <FileUp className="size-6" />
-                    {busy === 'upload' ? 'Reading…' : 'Upload a CSV file'}
+                    {uploading ? 'Reading…' : 'Upload a CSV file'}
                     <span className="text-xs font-normal text-muted">Up to 6 MB</span>
-                    <input ref={fileRef} type="file" accept=".csv,text/csv" className="sr-only" onChange={(e) => upload(e.target.files?.[0])} />
+                    <input ref={fileRef} type="file" accept=".csv,text/csv" className="sr-only" disabled={uploading} onChange={(e) => upload(e.target.files?.[0])} />
                   </label>
                   <Button className="w-full" variant="secondary" icon={Database} loading={busy === 'sample'} onClick={() => call('sample', '/replay/sample', {}, 'Kaggle sample loaded.')}>
                     Use the Kaggle sample
@@ -147,7 +154,7 @@ export function ReplayPage() {
             </SkeletonGroup>
           ) : !s?.dataset ? (
             <Card>
-              <EmptyState icon={FileUp} title="No dataset loaded" description="Upload a CSV or use the Kaggle sample to replay real traffic counts through the city." />
+              <EmptyState icon={FileUp} title="No dataset loaded" description="Upload a CSV or use the Kaggle sample. The model predicts every row straight away, and you can replay the counts through the city." />
             </Card>
           ) : (
             <>
@@ -177,9 +184,9 @@ export function ReplayPage() {
 
               <Card>
                 <CardHeader
-                  title="Actual vs predicted traffic"
+                  title="Replay: actual vs predicted as rows play"
                   icon={Brain}
-                  subtitle="Vehicles per 15 minutes from the dataset, and what the XGBoost model predicted 15 minutes earlier"
+                  subtitle="Vehicles per 15 minutes from the replayed rows, and what the XGBoost model predicted 15 minutes earlier"
                   actions={
                     s.next ? (
                       <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">

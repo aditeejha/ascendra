@@ -54,6 +54,14 @@ const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   success: 'bg-free text-white hover:bg-green-700 shadow-sm',
 };
 
+export function buttonClass(variant: ButtonVariant = 'primary', size: 'sm' | 'md' = 'md'): string {
+  return clsx(
+    'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 disabled:cursor-not-allowed disabled:opacity-50',
+    size === 'sm' ? 'h-8 px-3 text-[13px]' : 'h-10 px-4 text-sm',
+    BUTTON_VARIANTS[variant],
+  );
+}
+
 export function Button({
   variant = 'primary',
   size = 'md',
@@ -71,12 +79,7 @@ export function Button({
 }) {
   return (
     <button
-      className={clsx(
-        'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-500 disabled:cursor-not-allowed disabled:opacity-50',
-        size === 'sm' ? 'h-8 px-3 text-[13px]' : 'h-10 px-4 text-sm',
-        BUTTON_VARIANTS[variant],
-        className,
-      )}
+      className={clsx(buttonClass(variant, size), className)}
       disabled={disabled || loading}
       type="button"
       {...rest}
