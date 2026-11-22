@@ -13,6 +13,8 @@ export type NavKey =
   | 'alerts'
   | 'evacuation'
   | 'analytics'
+  | 'authority'
+  | 'replay'
   | 'settings';
 
 export const ROLE_META: Record<Role, { label: string; person: string; description: string; nav: NavKey[]; home: string }> = {
@@ -20,15 +22,15 @@ export const ROLE_META: Record<Role, { label: string; person: string; descriptio
     label: 'Traffic Controller',
     person: 'City Traffic Control Room',
     description: 'Monitors the network, manages signals, emergencies and evacuation.',
-    nav: ['dashboard', 'map', 'signals', 'emergency', 'routes', 'vehicles', 'civic', 'alerts', 'evacuation', 'analytics', 'settings'],
+    nav: ['dashboard', 'map', 'signals', 'emergency', 'routes', 'vehicles', 'civic', 'alerts', 'authority', 'evacuation', 'analytics', 'replay', 'settings'],
     home: '/',
   },
   authority: {
     label: 'Traffic Authority',
     person: 'Traffic Police HQ',
-    description: 'Verifies emergency vehicles, acts on overspeeding and civic issues.',
-    nav: ['dashboard', 'map', 'alerts', 'vehicles', 'civic', 'analytics'],
-    home: '/',
+    description: 'Verifies citizens and emergency vehicles, fixes civic issues and acts on overspeeding.',
+    nav: ['authority', 'dashboard', 'map', 'alerts', 'vehicles', 'civic', 'analytics', 'replay'],
+    home: '/authority',
   },
   emergency: {
     label: 'Emergency Driver',
@@ -47,8 +49,8 @@ export const ROLE_META: Record<Role, { label: string; person: string; descriptio
   citizen: {
     label: 'Citizen',
     person: 'Resident',
-    description: 'Reports civic issues and tracks their status.',
-    nav: ['civic', 'map', 'routes'],
+    description: 'Registers themselves, reports civic issues and tracks their status.',
+    nav: ['civic', 'vehicles', 'map', 'routes'],
     home: '/civic',
   },
 };

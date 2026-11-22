@@ -10,6 +10,7 @@ import {
   type ForecastResponse,
   type NetworkInfo,
   type Snapshot,
+  type TrafficSample,
   type VehicleClass,
 } from '../../../shared/types';
 import { CityMap, MapLegend, MapSkeleton } from '../components/CityMap';
@@ -24,6 +25,7 @@ type Selection = { kind: 'link'; id: number } | { kind: 'node'; id: number } | n
 function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       aria-pressed={active}
       className={clsx(
@@ -37,7 +39,7 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
 }
 
 export function LiveMapPage() {
-  const { network, snap } = useLive();
+  const { network, snap, live } = useLive();
   const [layer, setLayer] = useState<Layer>('now');
   const [selection, setSelection] = useState<Selection>(null);
   const [showVehicles, setShowVehicles] = useState(true);
@@ -83,7 +85,7 @@ export function LiveMapPage() {
     <>
       <PageHeader
         title="Live map"
-        description="Every vehicle, signal and congestion level in the simulated city, updated four times a second. Click a road or junction for details."
+        description={`${network.meta.city}'s real road network from OpenStreetMap with every vehicle, signal and congestion level, updated four times a second. Click a road or junction for details.`}
       />
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_340px]">
         <Card>
@@ -128,12 +130,12 @@ export function LiveMapPage() {
                 onLinkClick={(id) => setSelection({ kind: 'link', id })}
               />
             </div>
-            <MapLegend className="px-2 pt-3" />
+            <MapLegend className="px-2 pt-3" showLive />
           </div>
         </Card>
 
         <div className="flex flex-col gap-6">
-          <SelectionCard network={network} snap={snap} forecast={forecast.data} selection={selection} />
+          <SelectionCard network={network} snap={snap} forecast={forecast.data} selection={selection} samples={live?.traffic.samples ?? []} />
           <NetworkMixCard network={network} snap={snap} />
         </div>
       </div>
@@ -141,7 +143,19 @@ export function LiveMapPage() {
   );
 }
 
-function SelectionCard({ network, snap, forecast, selection }: { network: NetworkInfo; snap: Snapshot; forecast: ForecastResponse | null; selection: Selection }) {
+function SelectionCard({
+  network,
+  snap,
+  forecast,
+  selection,
+  samples,
+}: {
+  network: NetworkInfo;
+  snap: Snapshot;
+  forecast: ForecastResponse | null;
+  selection: Selection;
+  samples: TrafficSample[];
+}) {
   if (!selection) {
     return (
       <Card>
@@ -152,9 +166,33 @@ function SelectionCard({ network, snap, forecast, selection }: { network: Networ
   }
   if (selection.kind === 'node') {
     const node = network.nodes[selection.id];
-    const sig = snap.signals[selection.id];
-    const flags = sig[3];
+    const sig = snap.signals.find((s) => s[0] === selection.id);
+    const flags = sig?.[3] ?? 0;
     const incoming = network.links.filter((l) => l.to === node.id);
+    if (!sig) {
+      return (
+        <Card>
+          <CardHeader title={node.name} subtitle={node.poi?.name ?? node.exit ?? `Junction ${node.key}`} icon={TrafficCone} />
+          <CardBody className="space-y-4">
+            <div className="flex flex-wrap gap-1.5">
+              <Badge tone="neutral">{node.key}</Badge>
+              <Badge tone="navy">Give-way junction · no signal</Badge>
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Approaches</p>
+              <ul className="space-y-2">
+                {incoming.map((l) => (
+                  <li key={l.id} className="flex items-center justify-between gap-2 text-[13px]">
+                    <span className="truncate text-ink">{linkLabel(network, l)}</span>
+                    <span className="tabular shrink-0 text-muted">{snap.linkQueue[l.id]} queued</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </CardBody>
+        </Card>
+      );
+    }
     return (
       <Card>
         <CardHeader title={node.name} subtitle={node.poi?.name ?? node.exit ?? `Junction ${node.key}`} icon={TrafficCone} />
@@ -169,6 +207,7 @@ function SelectionCard({ network, snap, forecast, selection }: { network: Networ
           <div className="rounded-xl bg-navy-50 px-3 py-2.5 text-[13px]">
             <span className="text-muted">Green for </span>
             <span className="font-semibold text-ink">{sig[1] === 0 ? 'North – South' : 'East – West'}</span>
+            <span className="text-muted"> approaches</span>
             <span className="text-muted"> · {['green', 'yellow', 'all-red'][sig[2]]}</span>
           </div>
           <div>
@@ -190,6 +229,7 @@ function SelectionCard({ network, snap, forecast, selection }: { network: Networ
   const score = snap.linkScore[link.id];
   const flags = snap.linkFlags[link.id];
   const fc = forecast?.links[link.id];
+  const measured = samples.find((m) => m.linkId === link.id || m.linkId === link.reverse);
   return (
     <Card>
       <CardHeader title={linkLabel(network, link)} subtitle={`${network.nodes[link.from].name} → ${network.nodes[link.to].name}`} icon={MapPin} />
@@ -207,6 +247,15 @@ function SelectionCard({ network, snap, forecast, selection }: { network: Networ
           {flags & LINK_FLAG.contraflow ? <Badge tone="blue">Contraflow</Badge> : null}
           {flags & LINK_FLAG.greenWave ? <Badge tone="green">Green wave</Badge> : null}
         </div>
+        {measured && (
+          <div className="rounded-xl bg-navy-900 px-3.5 py-3 text-[13px] text-white">
+            <p className="text-xs font-semibold tracking-wide text-navy-200 uppercase">Measured by TomTom · {new Date(measured.at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</p>
+            <p className="mt-1">
+              <span className="tabular text-lg font-semibold">{Math.round(measured.currentKmh)} km/h</span>
+              <span className="text-navy-200"> now vs {Math.round(measured.freeFlowKmh)} km/h free-flow · simulated score {measured.simScore.toFixed(2)}, measured {measured.measuredScore.toFixed(2)}</span>
+            </p>
+          </div>
+        )}
         <dl className="grid grid-cols-2 gap-3 text-[13px]">
           {(
             [
@@ -251,7 +300,7 @@ function SelectionCard({ network, snap, forecast, selection }: { network: Networ
 }
 
 function NetworkMixCard({ network, snap }: { network: NetworkInfo; snap: Snapshot }) {
-  const counts: Record<VehicleClass, number> = { private: 0, two_wheeler: 0, cargo: 0, emergency: 0 };
+  const counts: Record<VehicleClass, number> = { private: 0, two_wheeler: 0, cargo: 0, bus: 0, emergency: 0 };
   for (const v of snap.vehicles) counts[CLASS_BY_CODE[v[3]]]++;
   const levels = { free: 0, moderate: 0, heavy: 0, congested: 0 };
   for (const s of snap.linkScore) levels[congestionLevel(s)]++;

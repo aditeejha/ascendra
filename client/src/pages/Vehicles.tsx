@@ -1,15 +1,16 @@
 import clsx from 'clsx';
-import { Ambulance, Bike, Car, CircleCheck, CircleX, Plus, Search, ShieldCheck, Truck, type LucideIcon } from 'lucide-react';
+import { Ambulance, Bike, BusFront, Car, CircleCheck, CircleX, Plus, Search, ShieldCheck, Truck, type LucideIcon } from 'lucide-react';
 import { useMemo, useState, type FormEvent } from 'react';
 import { CLASS_LABEL, type RegisteredVehicle, type RegistrationStatus, type VehicleClass } from '../../../shared/types';
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, Field, Input, PageHeader, Segmented, Select, Skeleton, SkeletonGroup, Stat, TD, TH, type Tone } from '../components/ui';
-import { api } from '../lib/api';
+import { PhotoInput } from '../components/PhotoInput';
+import { api, withRole } from '../lib/api';
 import { usePoll } from '../lib/hooks';
 import { useRole } from '../lib/role';
 import { useToast } from '../lib/toast';
 import { CLASS_COLOR, num, timeAgo } from '../lib/format';
 
-const CLASS_ICON: Record<VehicleClass, LucideIcon> = { private: Car, two_wheeler: Bike, cargo: Truck, emergency: Ambulance };
+const CLASS_ICON: Record<VehicleClass, LucideIcon> = { private: Car, two_wheeler: Bike, cargo: Truck, bus: BusFront, emergency: Ambulance };
 
 const STATUS_META: Record<RegistrationStatus, { label: string; tone: Tone }> = {
   active: { label: 'Active', tone: 'green' },
@@ -20,7 +21,7 @@ const STATUS_META: Record<RegistrationStatus, { label: string; tone: Tone }> = {
 
 type StatusFilter = 'all' | 'pending' | 'approved' | 'rejected';
 
-const EMPTY_FORM = { plate: '', vehicleClass: 'private' as VehicleClass, ownerName: '', phone: '', weightT: '', agency: '' };
+const EMPTY_FORM = { plate: '', vehicleClass: 'private' as VehicleClass, ownerName: '', phone: '', email: '', address: '', licenceNo: '', weightT: '', agency: '' };
 
 export function VehiclesPage() {
   const { role } = useRole();
@@ -30,7 +31,7 @@ export function VehiclesPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<number | null>(null);
-  const canRegister = role === 'driver' || role === 'controller' || role === 'authority' || role === 'emergency';
+  const canRegister = role === 'driver' || role === 'citizen' || role === 'controller' || role === 'authority' || role === 'emergency';
   const canVerify = role === 'authority' || role === 'controller';
 
   const all = registry.data ?? [];
@@ -41,7 +42,7 @@ export function VehiclesPage() {
       if (statusFilter === 'pending' && v.status !== 'pending_verification') return false;
       if (statusFilter === 'approved' && v.status !== 'active' && v.status !== 'verified') return false;
       if (statusFilter === 'rejected' && v.status !== 'rejected') return false;
-      if (q && !`${v.plate} ${v.ownerName} ${v.agency ?? ''}`.toLowerCase().includes(q)) return false;
+      if (q && !`${v.plate} ${v.ownerName} ${v.agency ?? ''} ${v.licenceNo ?? ''}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }, [all, classFilter, statusFilter, query]);
@@ -74,7 +75,7 @@ export function VehiclesPage() {
     <div>
       <PageHeader
         title="Vehicle registry"
-        description="Every vehicle is registered with its class so the platform can route it appropriately. Emergency vehicles get green-wave priority only after the traffic authority verifies them."
+        description="Citizens register themselves and their vehicle: number plate, name, contact details and a photo. The class decides how the vehicle is routed; emergency vehicles get green-wave priority only after the traffic authority verifies them. Contact details and photos are visible only to the authority."
       />
 
       {registry.loading && !registry.data ? (
@@ -201,8 +202,17 @@ function VehicleRow({
         </span>
       </td>
       <td className={TD}>
-        <p className="font-medium">{v.ownerName}</p>
-        {(v.agency || v.phone) && <p className="text-xs text-muted">{[v.agency, v.phone].filter(Boolean).join(' · ')}</p>}
+        <div className="flex items-center gap-3">
+          {canVerify && v.hasPhoto ? (
+            <img src={withRole(`/vehicles/${v.id}/photo`)} alt={`Photo of ${v.ownerName}`} className="size-9 shrink-0 rounded-full object-cover ring-1 ring-line" loading="lazy" />
+          ) : (
+            <span className="grid size-9 shrink-0 place-items-center rounded-full bg-navy-50 text-xs font-semibold text-navy-700">{v.ownerName.slice(0, 2).toUpperCase()}</span>
+          )}
+          <div className="min-w-0">
+            <p className="font-medium">{v.ownerName}</p>
+            {(v.agency || v.phone || v.licenceNo) && <p className="text-xs text-muted">{[v.agency, v.phone, v.licenceNo ? `DL ${v.licenceNo}` : null].filter(Boolean).join(' · ')}</p>}
+          </div>
+        </div>
       </td>
       <td className={clsx(TD, 'tabular text-muted')}>{v.weightT ? `${v.weightT} t` : '—'}</td>
       <td className={TD}>
@@ -234,6 +244,7 @@ function VehicleRow({
 function RegisterForm({ onRegistered }: { onRegistered: () => Promise<void> }) {
   const toast = useToast();
   const [form, setForm] = useState(EMPTY_FORM);
+  const [photo, setPhoto] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const set = <K extends keyof typeof EMPTY_FORM>(key: K, value: (typeof EMPTY_FORM)[K]) => setForm((f) => ({ ...f, [key]: value }));
@@ -257,6 +268,10 @@ function RegisterForm({ onRegistered }: { onRegistered: () => Promise<void> }) {
           vehicleClass: form.vehicleClass,
           ownerName: form.ownerName,
           phone: form.phone.trim() || null,
+          email: form.email.trim() || null,
+          address: form.address.trim() || null,
+          licenceNo: form.licenceNo.trim() || null,
+          ownerPhoto: photo,
           weightT: cargo ? weight : null,
           agency: emergency ? form.agency.trim() || null : null,
         },
@@ -268,6 +283,7 @@ function RegisterForm({ onRegistered }: { onRegistered: () => Promise<void> }) {
           : `${created.plate} registered.`,
       );
       setForm(EMPTY_FORM);
+      setPhoto(null);
       await onRegistered();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed.');
@@ -278,7 +294,7 @@ function RegisterForm({ onRegistered }: { onRegistered: () => Promise<void> }) {
 
   return (
     <Card className="self-start">
-      <CardHeader title="Register a vehicle" subtitle="Class decides routing rules and priority" icon={Plus} />
+      <CardHeader title="Register yourself and your vehicle" subtitle="Owner details, photo and the vehicle's class" icon={Plus} />
       <CardBody>
         <form className="space-y-4" onSubmit={submit}>
           <Field label="Registration number" hint="Indian format, e.g. JH 15 AB 1234">
@@ -308,15 +324,31 @@ function RegisterForm({ onRegistered }: { onRegistered: () => Promise<void> }) {
               })}
             </div>
           </div>
-          <Field label={emergency ? 'Operator / hospital' : 'Owner name'}>
-            <Input required minLength={2} value={form.ownerName} onChange={(e) => set('ownerName', e.target.value)} placeholder={emergency ? 'Sadar Hospital' : 'Full name or company'} />
-          </Field>
-          <Field label="Contact phone">
-            <Input type="tel" value={form.phone} onChange={(e) => set('phone', e.target.value)} placeholder="Optional" />
+          <div className="flex items-start gap-4">
+            <PhotoInput value={photo} onChange={setPhoto} shape="round" label="Owner photo" />
+            <div className="min-w-0 flex-1 space-y-3">
+              <Field label={emergency ? 'Operator / hospital' : 'Owner name'}>
+                <Input required minLength={2} value={form.ownerName} onChange={(e) => set('ownerName', e.target.value)} placeholder={emergency ? 'Sadar Hospital' : 'Full name as on the RC'} autoComplete="name" />
+              </Field>
+              <Field label="Mobile number">
+                <Input type="tel" value={form.phone} onChange={(e) => set('phone', e.target.value)} placeholder="98xxxxxxxx" autoComplete="tel" maxLength={15} />
+              </Field>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label="Email (optional)">
+              <Input type="email" value={form.email} onChange={(e) => set('email', e.target.value)} placeholder="name@example.com" autoComplete="email" />
+            </Field>
+            <Field label="Driving licence no. (optional)">
+              <Input value={form.licenceNo} onChange={(e) => set('licenceNo', e.target.value.toUpperCase())} placeholder="JH15 2019 0001234" className="font-mono" maxLength={30} />
+            </Field>
+          </div>
+          <Field label="Address (optional)">
+            <Input value={form.address} onChange={(e) => set('address', e.target.value)} placeholder="Locality, Deoghar" maxLength={200} autoComplete="street-address" />
           </Field>
           {cargo && (
             <Field label="Gross weight (tonnes)" hint="Used to keep heavy cargo off lanes and weight-limited bridges.">
-              <Input type="number" min={0.1} max={60} step={0.5} required value={form.weightT} onChange={(e) => set('weightT', e.target.value)} placeholder="18" />
+              <Input type="number" min={0.1} max={60} step="any" required value={form.weightT} onChange={(e) => set('weightT', e.target.value)} placeholder="18" />
             </Field>
           )}
           {emergency && (

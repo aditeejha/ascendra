@@ -16,13 +16,15 @@ import {
   Siren,
   Sun,
   TrafficCone,
+  Upload,
+  UserRoundCheck,
   X,
   type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { WEATHER_LABEL, type Role, type Weather } from '../../../shared/types';
-import { useLive } from '../lib/live';
+import { timezoneAbbr, useLive } from '../lib/live';
 import { ROLE_META, useRole, type NavKey } from '../lib/role';
 import { Logo } from './Logo';
 
@@ -56,12 +58,14 @@ const GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { key: 'civic', to: '/civic', label: 'Civic Reports', icon: MessageSquareExclamationPoint },
       { key: 'alerts', to: '/alerts', label: 'Overspeeding', icon: Gauge },
+      { key: 'authority', to: '/authority', label: 'Authority Desk', icon: UserRoundCheck },
     ],
   },
   {
     title: 'Insights',
     items: [
       { key: 'analytics', to: '/analytics', label: 'Reports & Analytics', icon: ChartColumn },
+      { key: 'replay', to: '/replay', label: 'Data Replay', icon: Upload },
       { key: 'settings', to: '/settings', label: 'Settings', icon: Settings },
     ],
   },
@@ -153,9 +157,11 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 function Topbar({ onMenu }: { onMenu: () => void }) {
-  const { snap, connected } = useLive();
+  const { snap, connected, live } = useLive();
   const { role, setRole } = useRole();
   const WeatherIcon = snap ? WEATHER_ICON[snap.weather] : Sun;
+  const reading = live?.weather.mode === 'live' ? live.weather.reading : null;
+  const tz = live ? timezoneAbbr(live.city.timezone) : '';
   return (
     <header className="sticky top-0 z-20 flex h-16 items-center gap-3 border-b border-line bg-white/90 px-4 backdrop-blur sm:px-6">
       <button className="grid size-9 place-items-center rounded-lg text-navy-700 hover:bg-navy-50 lg:hidden" onClick={onMenu} aria-label="Open navigation">
@@ -163,8 +169,12 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
       </button>
       <div className="flex min-w-0 flex-1 items-center gap-3">
         <div className="hidden items-baseline gap-2 sm:flex">
+          {live && <span className="text-sm font-semibold text-navy-900">{live.city.name}</span>}
           <span className="tabular text-xl font-semibold tracking-tight text-navy-900">{snap?.clock ?? '--:--'}</span>
-          <span className="text-[13px] text-muted">{snap?.day ?? ''}</span>
+          <span className="text-[13px] text-muted">
+            {snap?.day ?? ''}
+            {snap?.liveClock && tz ? ` · ${tz}` : ''}
+          </span>
         </div>
         <span
           className={clsx(
@@ -173,12 +183,15 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
           )}
         >
           <span className={clsx('size-1.5 rounded-full', !connected ? 'bg-jam' : snap?.paused ? 'bg-moderate' : 'animate-pulse bg-free')} />
-          {!connected ? 'Reconnecting' : snap?.paused ? 'Paused' : `Live · ${snap?.speed ?? 1}×`}
+          {!connected ? 'Reconnecting' : snap?.paused ? 'Paused' : snap?.liveClock ? 'Live' : `Fast-forward · ${snap?.speed ?? 1}×`}
         </span>
         {snap && (
-          <span className="hidden items-center gap-1.5 rounded-full bg-navy-50 px-2.5 py-1 text-xs font-medium text-navy-700 ring-1 ring-line ring-inset md:inline-flex">
+          <span
+            className="hidden items-center gap-1.5 rounded-full bg-navy-50 px-2.5 py-1 text-xs font-medium text-navy-700 ring-1 ring-line ring-inset md:inline-flex"
+            title={reading ? `Live weather from Open-Meteo, updated ${new Date(reading.fetchedAt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : 'Weather set manually in Settings'}
+          >
             <WeatherIcon className="size-3.5" />
-            {WEATHER_LABEL[snap.weather]}
+            {reading ? `${Math.round(reading.temperatureC)}°C · ${reading.description}` : `${WEATHER_LABEL[snap.weather]} (manual)`}
           </span>
         )}
         {snap && (
@@ -189,6 +202,17 @@ function Topbar({ onMenu }: { onMenu: () => void }) {
             )}
           >
             {snap.adaptive ? 'Adaptive control' : 'Fixed-time control'}
+          </span>
+        )}
+        {live && (
+          <span
+            className={clsx(
+              'hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset xl:inline-flex',
+              live.traffic.status === 'ok' ? 'bg-green-50 text-green-700 ring-green-200' : 'bg-navy-50 text-muted ring-line',
+            )}
+            title={live.traffic.error ?? (live.traffic.configured ? 'Live speeds and incidents from TomTom' : 'Add TOMTOM_API_KEY to .env for live traffic')}
+          >
+            {live.traffic.status === 'ok' ? 'Live traffic · TomTom' : live.traffic.configured ? 'TomTom connecting' : 'Simulated traffic'}
           </span>
         )}
         {snap?.evacuation && (

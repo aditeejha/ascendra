@@ -21,6 +21,7 @@ REPORT_OUT = ROOT / "ml" / "reports" / "forecaster_metrics.json"
 
 FEATURES = [
     "score",
+    "score_mean5",
     "score_lag5",
     "score_lag10",
     "score_lag15",
@@ -121,7 +122,7 @@ def main():
         x_test = test[FEATURES].to_numpy()
         y_test = test[target].to_numpy()
         pred = np.clip(booster.predict(xgb.DMatrix(test[FEATURES])), 0, 1)
-        persistence = test["score"].to_numpy()
+        persistence = test["score_mean5"].to_numpy()
 
         busy = (y_test >= 0.35) | (persistence >= 0.35)
         h = str(horizon)

@@ -78,6 +78,7 @@ export function Button({
         className,
       )}
       disabled={disabled || loading}
+      type="button"
       {...rest}
     >
       {loading ? <LoaderCircle className="size-4 animate-spin" /> : Icon ? <Icon className="size-4" /> : null}
@@ -198,6 +199,7 @@ export function Segmented<T extends string | number>({
       {options.map((o) => (
         <button
           key={String(o.value)}
+          type="button"
           role="radio"
           aria-checked={o.value === value}
           onClick={() => onChange(o.value)}
@@ -263,6 +265,7 @@ export function Toggle({
         {description && <p className="mt-0.5 text-[13px] text-muted">{description}</p>}
       </div>
       <button
+        type="button"
         role="switch"
         aria-checked={checked}
         aria-label={label}

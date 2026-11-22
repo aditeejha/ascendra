@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { EvaluationResult } from '../../shared/types';
-import { Forecaster, type ForecasterFile } from './forecaster';
+import { Forecaster, matchesSimulator, type ForecasterFile } from './forecaster';
+import { JunctionForecaster, type JunctionModelFile } from './junction';
 import { QPolicy, type PolicyFile } from './rl';
 
 export const MODELS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../models');
@@ -27,9 +28,19 @@ export function loadPolicy(): QPolicy | null {
 
 export function loadForecaster(): Forecaster | null {
   const file = readJson<ForecasterFile>('forecaster.json');
-  return file ? new Forecaster(file) : null;
+  if (!file) return null;
+  if (!matchesSimulator(file)) {
+    console.warn('forecaster.json was trained on a different feature list. Run npm run sim:history && npm run train:forecaster.');
+    return null;
+  }
+  return new Forecaster(file);
 }
 
 export function loadEvaluation(): EvaluationResult | null {
   return readJson<EvaluationResult>('evaluation.json');
+}
+
+export function loadJunctionModel(): JunctionForecaster | null {
+  const file = readJson<JunctionModelFile>('junction-forecaster.json');
+  return file ? new JunctionForecaster(file) : null;
 }

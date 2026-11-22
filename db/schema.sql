@@ -72,3 +72,28 @@ CREATE TABLE IF NOT EXISTS audit_log (
   details JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS licence_no TEXT;
+ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS owner_photo TEXT;
+
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS reporter_phone TEXT;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS photo TEXT;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS assigned_to TEXT;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS resolution_photo TEXT;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS rating INTEGER;
+ALTER TABLE civic_reports ADD COLUMN IF NOT EXISTS reopen_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS civic_events (
+  id SERIAL PRIMARY KEY,
+  report_id INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  actor_role TEXT NOT NULL,
+  actor_name TEXT,
+  note TEXT,
+  photo TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)

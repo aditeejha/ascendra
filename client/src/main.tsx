@@ -23,6 +23,8 @@ const CivicPage = page(() => import('./pages/Civic'), 'CivicPage');
 const AlertsPage = page(() => import('./pages/Alerts'), 'AlertsPage');
 const AnalyticsPage = page(() => import('./pages/Analytics'), 'AnalyticsPage');
 const SettingsPage = page(() => import('./pages/Settings'), 'SettingsPage');
+const AuthorityDeskPage = page(() => import('./pages/AuthorityDesk'), 'AuthorityDeskPage');
+const ReplayPage = page(() => import('./pages/Replay'), 'ReplayPage');
 
 function PageFallback() {
   return (
@@ -75,6 +77,8 @@ createRoot(document.getElementById('root')!).render(
                 <Route path="alerts" element={<Guard nav="alerts" what="Overspeeding alerts"><AlertsPage /></Guard>} />
                 <Route path="analytics" element={<Guard nav="analytics" what="Reports & analytics"><AnalyticsPage /></Guard>} />
                 <Route path="settings" element={<Guard nav="settings" what="Settings"><SettingsPage /></Guard>} />
+                <Route path="authority" element={<Guard nav="authority" what="The authority desk"><AuthorityDeskPage /></Guard>} />
+                <Route path="replay" element={<Guard nav="replay" what="Data replay"><ReplayPage /></Guard>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Route>
             </Routes>

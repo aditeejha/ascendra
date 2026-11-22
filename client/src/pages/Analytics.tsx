@@ -60,14 +60,13 @@ export function AnalyticsPage() {
   };
 
   const result = evaluation.data?.result ?? null;
-  const metrics = forecast.data?.model.metrics ?? null;
   const canRun = role === 'controller' || role === 'authority';
 
   return (
     <>
       <PageHeader
         title="Reports & analytics"
-        description="How ASCENDRA performs against fixed-time signals in simulation, how accurate the congestion forecasts are, and what the network looks like right now."
+        description="How ASCENDRA performs against fixed-time signals on the real road network, how accurate both XGBoost forecasters are, and what the city looks like right now."
         actions={
           canRun ? (
             <Button icon={RefreshCw} onClick={rerun} loading={running} variant="navy">
@@ -89,14 +88,18 @@ export function AnalyticsPage() {
         </Card>
       )}
 
-      <HeadlineStats result={result} metrics={metrics} loading={evaluation.loading || forecast.loading} />
+      <HeadlineStats result={result} junction={(forecast.data?.junctionModel.metrics as Record<string, number> | null) ?? null} loading={evaluation.loading || forecast.loading} />
 
       <div className="mt-6">
         <EvaluationCard result={result} loading={evaluation.loading} />
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <JunctionModelCard forecast={forecast.data} loading={forecast.loading} />
         <ForecasterCard forecast={forecast.data} loading={forecast.loading} />
+      </div>
+
+      <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
         <LiveAccuracyCard live={live.data} loading={live.loading} />
       </div>
 
@@ -108,7 +111,7 @@ export function AnalyticsPage() {
   );
 }
 
-function HeadlineStats({ result, metrics, loading }: { result: EvaluationResult | null; metrics: Record<string, number> | null; loading: boolean }) {
+function HeadlineStats({ result, junction, loading }: { result: EvaluationResult | null; junction: Record<string, number> | null; loading: boolean }) {
   if (loading && !result) {
     return (
       <SkeletonGroup label="Loading headline results" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -138,11 +141,11 @@ function HeadlineStats({ result, metrics, loading }: { result: EvaluationResult 
         sub={em ? `vs ${em.withoutPriorityMin} min without green wave (${pct(reduction(em.withoutPriorityMin, em.withPriorityMin))} faster)` : 'Run the evaluation'}
       />
       <Stat
-        label="Forecast level accuracy"
-        value={pct(metrics?.levelAcc15, 1)}
+        label="Junction forecast accuracy"
+        value={pct(junction?.situationAcc15, 1)}
         icon={Brain}
         tone="navy"
-        sub={metrics ? `+15 min on held-out days · persistence ${pct(metrics.baselineLevelAcc15, 1)}` : 'Model not trained'}
+        sub={junction ? `+15 min on real camera data · persistence ${pct(junction.situationAccPersistence15, 1)}` : 'Junction model not trained'}
       />
     </div>
   );
@@ -271,7 +274,7 @@ function ForecasterCard({ forecast, loading }: { forecast: ForecastResponse | nu
       ) : (
         <CardBody>
           <p className="mb-3 text-[13px] text-muted">
-            Held-out test days ({num(m.testRows)} link-samples), compared with persistence (assume the congestion stays as it is now).
+            Each forecast is the average congestion over the 5 minutes up to +15 or +30 min. Scored on held-out test days ({num(m.testRows)} link-samples) against persistence (congestion stays at its average over the last 5 minutes).
           </p>
           <div className="relative overflow-x-auto">
             <table className="w-full min-w-[420px]">
@@ -291,11 +294,80 @@ function ForecasterCard({ forecast, loading }: { forecast: ForecastResponse | nu
             </table>
           </div>
           <p className="mt-3 text-xs text-muted">
-            Trained on {num(m.trainRows)} samples from {m.days} simulated days (mixed weather, incidents, fixed and adaptive control). Exported trees reproduce XGBoost's predictions to within {m.exportParity15?.toExponential(0)}.
+            Per-road model for routing and hotspots, trained on {num(m.trainRows)} samples from {m.days} simulated days on the real road network (no public road-by-road data exists for the city). Exported trees reproduce XGBoost's predictions to within {m.exportParity15?.toExponential(0)}.
           </p>
         </CardBody>
       )}
     </Card>
+  );
+}
+
+function JunctionModelCard({ forecast, loading }: { forecast: ForecastResponse | null; loading: boolean }) {
+  const info = forecast?.junctionModel;
+  const m = info?.metrics as Record<string, number> | null | undefined;
+  return (
+    <Card>
+      <CardHeader
+        title="Junction forecaster · real camera counts"
+        icon={Brain}
+        subtitle={info?.available ? `${info.name} · trained ${info.trainedAt ? new Date(info.trainedAt).toLocaleDateString('en-IN') : ''}` : 'Not trained'}
+      />
+      {loading && !forecast ? (
+        <SkeletonGroup label="Loading junction forecaster" className="space-y-2 p-5">
+          {Array.from({ length: 5 }, (item, i) => (
+            <Skeleton key={i} className="h-9 w-full" />
+          ))}
+        </SkeletonGroup>
+      ) : !m || !info?.dataset ? (
+        <EmptyState icon={Brain} title="Junction model not trained" description="Run npm run train:junction to train it on the Kaggle Traffic Prediction Dataset." />
+      ) : (
+        <CardBody>
+          <p className="mb-3 text-[13px] text-muted">
+            Trained on{' '}
+            <a href={info.dataset.url} target="_blank" rel="noreferrer" className="font-medium text-brand-600 hover:underline">
+              {info.dataset.name}
+            </a>
+            : {num(info.dataset.rows)} real 15-minute vehicle counts over {info.dataset.days} days. Tested on the last 9 days ({num(m.testRows)} intervals), against persistence.
+          </p>
+          <div className="relative overflow-x-auto">
+            <table className="w-full min-w-[420px]">
+              <thead className="border-b border-line">
+                <tr>
+                  <th className={TH}>Metric</th>
+                  <th className={TH}>+15 min</th>
+                  <th className={TH}>+30 min</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                <CountRow label="Vehicle count error (MAE)" a={m.countMae15} b={m.countMae30} base={[m.countMaePersistence15, m.countMaePersistence30]} />
+                <MetricRow label="Count R²" a={m.countR2_15} b={m.countR2_30} />
+                <MetricRow label="Traffic situation accuracy" a={m.situationAcc15} b={m.situationAcc30} base={[m.situationAccPersistence15, m.situationAccPersistence30]} percent />
+                <MetricRow label="Heavy traffic caught (recall)" a={m.heavyRecall15} b={m.heavyRecall30} percent />
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-3 text-xs text-muted">
+            Every 15 minutes ASCENDRA counts cars, two-wheelers and heavy vehicles on the busiest approach of each signal and asks this model for the situation now, in 15 and in 30 minutes; a predicted jam raises that approach's green priority.
+          </p>
+        </CardBody>
+      )}
+    </Card>
+  );
+}
+
+function CountRow({ label, a, b, base }: { label: string; a: number; b: number; base: [number, number] }) {
+  const cell = (v: number, ref: number) => (
+    <span>
+      <span className="tabular font-semibold text-ink">{v.toFixed(1)}</span>
+      <span className={`tabular ml-1.5 text-xs ${v < ref ? 'text-free' : 'text-jam'}`}>vs {ref.toFixed(1)}</span>
+    </span>
+  );
+  return (
+    <tr>
+      <td className={TD}>{label}</td>
+      <td className={TD}>{cell(a, base[0])}</td>
+      <td className={TD}>{cell(b, base[1])}</td>
+    </tr>
   );
 }
 

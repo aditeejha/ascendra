@@ -18,10 +18,11 @@ export const CLASS_COLOR: Record<VehicleClass, string> = {
   private: '#1f3d84',
   two_wheeler: '#0ea5e9',
   cargo: '#b45309',
+  bus: '#7c3aed',
   emergency: '#dc2626',
 };
 
-export const CLASS_BY_CODE: VehicleClass[] = ['private', 'two_wheeler', 'cargo', 'emergency'];
+export const CLASS_BY_CODE: VehicleClass[] = ['private', 'two_wheeler', 'cargo', 'emergency', 'bus'];
 
 export function scoreColor(score: number): string {
   return LEVEL_COLOR[congestionLevel(score)];

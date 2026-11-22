@@ -1,5 +1,5 @@
-export type VehicleClass = 'private' | 'two_wheeler' | 'cargo' | 'emergency';
-export type LinkKind = 'ring' | 'arterial' | 'street' | 'lane';
+export type VehicleClass = 'private' | 'two_wheeler' | 'cargo' | 'bus' | 'emergency';
+export type LinkKind = 'highway' | 'arterial' | 'street' | 'lane';
 export type Phase = 'NS' | 'EW';
 export type SignalState = 'green' | 'yellow' | 'allred';
 export type SignalMode = 'adaptive' | 'fixed';
@@ -7,9 +7,11 @@ export type Weather = 'clear' | 'rain' | 'heavy_rain' | 'fog';
 export type Role = 'controller' | 'authority' | 'citizen' | 'driver' | 'emergency';
 export type CongestionLevel = 'free' | 'moderate' | 'heavy' | 'congested';
 export type Dir = 'N' | 'S' | 'E' | 'W';
-export type PoiKind = 'hospital' | 'fire' | 'police' | 'depot' | 'station' | 'market';
+export type JunctionSituation = 'low' | 'normal' | 'high' | 'heavy';
+export type DisasterKind = 'earthquake' | 'flood' | 'fire' | 'other';
+export type PoiKind = 'hospital' | 'fire' | 'police' | 'station' | 'bus' | 'market' | 'college' | 'attraction';
 
-export const VEHICLE_CLASSES: VehicleClass[] = ['private', 'two_wheeler', 'cargo', 'emergency'];
+export const VEHICLE_CLASSES: VehicleClass[] = ['private', 'two_wheeler', 'cargo', 'bus', 'emergency'];
 
 export interface Poi {
   kind: PoiKind;
@@ -19,11 +21,12 @@ export interface Poi {
 export interface NetNode {
   id: number;
   key: string;
-  r: number;
-  c: number;
   x: number;
   y: number;
+  lat: number;
+  lon: number;
   name: string;
+  signal: 'osm' | 'inferred' | null;
   poi?: Poi;
   exit?: string;
 }
@@ -43,6 +46,31 @@ export interface NetLink {
   core: boolean;
   camera: boolean;
   reverse: number;
+  oneway: boolean;
+  bridge: boolean;
+  geometry: number[];
+}
+
+export interface NetworkMeta {
+  city: string;
+  region: string;
+  country: string;
+  displayName: string;
+  source: string;
+  via: string;
+  fetchedAt: string;
+  centre: { lat: number; lon: number; x: number; y: number };
+  zoom: number;
+  tileOrigin: { x: number; y: number };
+  metersPerPixel: number;
+  restrictedZoneKm: number;
+  segmentCount: number;
+  signalCount: number;
+  evacuationRadiiKm: number[];
+  rules: { weeklyOff: string[]; freightBanHours: [number, number][]; timezone: string };
+  bbox: { south: number; west: number; north: number; east: number };
+  width: number;
+  height: number;
 }
 
 export interface NetworkInfo {
@@ -51,6 +79,7 @@ export interface NetworkInfo {
   width: number;
   height: number;
   exits: number[];
+  meta: NetworkMeta;
 }
 
 export interface Kpis {
@@ -70,7 +99,7 @@ export type SignalTuple = [nodeId: number, phase: number, state: number, flags: 
 
 export const VEHICLE_FLAG = { queued: 1, priority: 2, evacuating: 4 } as const;
 export const SIGNAL_FLAG = { adaptive: 1, preempted: 2, fault: 4, evacuation: 8 } as const;
-export const LINK_FLAG = { incident: 1, closed: 2, contraflow: 4, greenWave: 8 } as const;
+export const LINK_FLAG = { incident: 1, closed: 2, contraflow: 4, greenWave: 8, measured: 16, liveIncident: 32 } as const;
 
 export interface ActiveEmergency {
   vehicleId: number;
@@ -86,7 +115,10 @@ export interface ActiveEmergency {
 
 export interface EvacuationStatus {
   center: number;
-  radius: number;
+  radiusKm: number;
+  kind: DisasterKind;
+  bridgesClosed: number[];
+  slowedLinks: number;
   zoneNodes: number[];
   closedLinks: number[];
   contraflowLinks: number[];
@@ -106,6 +138,7 @@ export interface Snapshot {
   speed: number;
   paused: boolean;
   adaptive: boolean;
+  liveClock: boolean;
   kpis: Kpis;
   linkScore: number[];
   linkQueue: number[];
@@ -186,6 +219,30 @@ export interface ModelInfo {
   metrics: Record<string, number> | null;
 }
 
+export interface JunctionOutlook {
+  nodeId: number;
+  name: string;
+  approachLinkId: number;
+  approachRoad: string;
+  clock: string;
+  counts: { car: number; bike: number; heavy: number; total: number };
+  situationNow: JunctionSituation;
+  situation15: JunctionSituation;
+  situation30: JunctionSituation;
+  probs15: number[];
+  probs30: number[];
+  count15: number;
+  count30: number;
+}
+
+export interface JunctionModelInfo {
+  available: boolean;
+  name: string;
+  dataset: { name: string; url: string; rows: number; days: number; intervalMin: number } | null;
+  trainedAt: string | null;
+  metrics: Record<string, number | null> | null;
+}
+
 export interface ForecastResponse {
   t: number;
   clock: string;
@@ -193,6 +250,8 @@ export interface ForecastResponse {
   links: LinkForecast[];
   hotspots: Hotspot[];
   interventions: Intervention[];
+  junctionModel: JunctionModelInfo;
+  junctions: JunctionOutlook[];
 }
 
 export interface RoutePlan {
@@ -221,6 +280,10 @@ export interface RegisteredVehicle {
   vehicleClass: VehicleClass;
   ownerName: string;
   phone: string | null;
+  email: string | null;
+  address: string | null;
+  licenceNo: string | null;
+  hasPhoto: boolean;
   weightT: number | null;
   agency: string | null;
   status: RegistrationStatus;
@@ -236,7 +299,8 @@ export type CivicCategory =
   | 'illegal_parking'
   | 'streetlight';
 
-export type CivicStatus = 'reported' | 'verified' | 'in_progress' | 'resolved' | 'rejected';
+export type CivicStatus = 'reported' | 'verified' | 'assigned' | 'in_progress' | 'resolved' | 'closed' | 'reopened' | 'rejected';
+export type CivicAction = 'verify' | 'reject' | 'assign' | 'start' | 'resolve' | 'close' | 'reopen';
 export type Severity = 'low' | 'medium' | 'high';
 
 export interface CivicReport {
@@ -247,10 +311,30 @@ export interface CivicReport {
   nodeId: number | null;
   severity: Severity;
   reporterName: string;
+  reporterPhone: string | null;
   status: CivicStatus;
   impactApplied: boolean;
+  hasPhoto: boolean;
+  assignedTo: string | null;
+  dueAt: string | null;
+  late: boolean;
+  resolutionNote: string | null;
+  hasResolutionPhoto: boolean;
+  rating: number | null;
+  reopenCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CivicEvent {
+  id: number;
+  reportId: number;
+  status: CivicStatus;
+  actorRole: Role;
+  actorName: string | null;
+  note: string | null;
+  hasPhoto: boolean;
+  createdAt: string;
 }
 
 export type AlertStatus = 'open' | 'fined' | 'dismissed';
@@ -354,6 +438,8 @@ export interface EvaluationResult {
 }
 
 export interface SimSettings {
+  liveClock: boolean;
+  liveWeather: boolean;
   speed: number;
   paused: boolean;
   weather: Weather;
@@ -362,6 +448,100 @@ export interface SimSettings {
   emergencyPriority: boolean;
   adaptive: boolean;
   forecastRouting: boolean;
+}
+
+export interface ReplaySummary {
+  name: string;
+  rows: number;
+  days: number;
+  meanTotal: number;
+  maxTotal: number;
+  shares: { car: number; bike: number; bus: number; truck: number };
+  hasLabels: boolean;
+  warnings: string[];
+  uploadedAt: string;
+}
+
+export interface ReplayPoint {
+  index: number;
+  clock: string;
+  day: string;
+  actual: number;
+  car: number;
+  bike: number;
+  heavy: number;
+  situation: JunctionSituation | null;
+  modelSituation: JunctionSituation | null;
+  pred15: number | null;
+  pred30: number | null;
+  predSituation15: JunctionSituation | null;
+}
+
+export interface ReplayStatus {
+  dataset: ReplaySummary | null;
+  running: boolean;
+  index: number;
+  speed: number;
+  current: ReplayPoint | null;
+  next: { count15: number; count30: number; situation15: JunctionSituation; situation30: JunctionSituation } | null;
+  history: ReplayPoint[];
+  accuracy: { n: number; mae15: number | null; maePersistence15: number | null; situationAcc15: number | null };
+}
+
+export interface WeatherReading {
+  temperatureC: number;
+  precipitationMm: number;
+  visibilityM: number | null;
+  weatherCode: number;
+  windKmh: number;
+  condition: Weather;
+  description: string;
+  observedAt: string;
+  fetchedAt: string;
+}
+
+export interface TrafficSample {
+  linkId: number;
+  road: string;
+  currentKmh: number;
+  freeFlowKmh: number;
+  ratio: number;
+  measuredScore: number;
+  simScore: number;
+  confidence: number;
+  closed: boolean;
+  at: string;
+}
+
+export interface LiveIncident {
+  id: string;
+  category: string;
+  description: string;
+  delaySec: number | null;
+  linkIds: number[];
+  from: string | null;
+  to: string | null;
+}
+
+export interface LiveStatus {
+  city: { name: string; region: string; country: string; timezone: string; localTime: string; localDay: string };
+  clock: { mode: 'live' | 'fast' | 'replay'; simClock: string; simDay: string };
+  network: { source: string; via: string; fetchedAt: string; nodes: number; links: number; signalsOsm: number; signalsInferred: number };
+  weather: { source: string; mode: 'live' | 'manual'; reading: WeatherReading | null; error: string | null };
+  traffic: {
+    provider: string;
+    configured: boolean;
+    status: 'ok' | 'no_key' | 'error' | 'budget' | 'starting';
+    error: string | null;
+    requestsToday: number;
+    dailyBudget: number;
+    lastFlowAt: string | null;
+    lastIncidentsAt: string | null;
+    samples: TrafficSample[];
+    incidents: LiveIncident[];
+    calibration: number;
+    accuracy: { mae: number | null; baselineMae: number | null; n: number };
+  };
 }
 
 export interface AuditEntry {
@@ -385,6 +565,7 @@ export const CLASS_LABEL: Record<VehicleClass, string> = {
   private: 'Private car',
   two_wheeler: 'Two-wheeler',
   cargo: 'Cargo / freight',
+  bus: 'Bus / public transport',
   emergency: 'Emergency',
 };
 

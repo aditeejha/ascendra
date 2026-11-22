@@ -1,0 +1,270 @@
+{
+  "metrics": {
+    "trainRows": 4220,
+    "valRows": 864,
+    "testRows": 862,
+    "countMae15": 19.89,
+    "countRmse15": 26.57,
+    "countR2_15": 0.807,
+    "countMaePersistence15": 24.63,
+    "countMaeYesterday15": 32.93,
+    "countTrees15": 425,
+    "countParity15": 1.45e-06,
+    "countMae30": 20.29,
+    "countRmse30": 27.32,
+    "countR2_30": 0.796,
+    "countMaePersistence30": 28.77,
+    "countMaeYesterday30": 32.93,
+    "countTrees30": 164,
+    "countParity30": 7.87e-07,
+    "situationAcc0": 0.9292,
+    "situationF1_0": 0.9005,
+    "heavyRecall0": 1.0,
+    "situationTrees0": 171,
+    "situationParity0": 5.51e-07,
+    "situationAcc15": 0.7088,
+    "situationF1_15": 0.555,
+    "heavyRecall15": 0.8889,
+    "situationAccPersistence15": 0.6473,
+    "situationF1Persistence15": 0.531,
+    "situationAccYesterday15": 0.5592,
+    "situationTrees15": 152,
+    "situationParity15": 5.57e-07,
+    "situationAcc30": 0.681,
+    "situationF1_30": 0.5222,
+    "heavyRecall30": 0.9082,
+    "situationAccPersistence30": 0.5986,
+    "situationF1Persistence30": 0.4698,
+    "situationAccYesterday30": 0.5603,
+    "situationTrees30": 109,
+    "situationParity30": 4.22e-07
+  },
+  "confusion0": {
+    "labels": [
+      "low",
+      "normal",
+      "high",
+      "heavy"
+    ],
+    "matrix": [
+      [
+        137,
+        6,
+        0,
+        0
+      ],
+      [
+        24,
+        407,
+        18,
+        2
+      ],
+      [
+        0,
+        11,
+        50,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        207
+      ]
+    ]
+  },
+  "importance0": [
+    {
+      "feature": "total",
+      "gain": 37.625
+    },
+    {
+      "feature": "heavy",
+      "gain": 26.872
+    },
+    {
+      "feature": "heavy_share",
+      "gain": 21.919
+    },
+    {
+      "feature": "car",
+      "gain": 12.708
+    },
+    {
+      "feature": "tod_cos",
+      "gain": 3.465
+    },
+    {
+      "feature": "total_mean4",
+      "gain": 2.746
+    },
+    {
+      "feature": "total_lag2",
+      "gain": 2.296
+    },
+    {
+      "feature": "bike_share",
+      "gain": 2.112
+    },
+    {
+      "feature": "total_std4",
+      "gain": 1.921
+    },
+    {
+      "feature": "bike",
+      "gain": 1.834
+    }
+  ],
+  "confusion15": {
+    "labels": [
+      "low",
+      "normal",
+      "high",
+      "heavy"
+    ],
+    "matrix": [
+      [
+        63,
+        72,
+        4,
+        4
+      ],
+      [
+        53,
+        358,
+        20,
+        20
+      ],
+      [
+        1,
+        33,
+        6,
+        21
+      ],
+      [
+        3,
+        17,
+        3,
+        184
+      ]
+    ]
+  },
+  "importance15": [
+    {
+      "feature": "car",
+      "gain": 26.306
+    },
+    {
+      "feature": "heavy_share",
+      "gain": 11.184
+    },
+    {
+      "feature": "total",
+      "gain": 9.368
+    },
+    {
+      "feature": "tod_cos",
+      "gain": 8.091
+    },
+    {
+      "feature": "total_mean4",
+      "gain": 6.575
+    },
+    {
+      "feature": "heavy",
+      "gain": 6.035
+    },
+    {
+      "feature": "weekend",
+      "gain": 5.579
+    },
+    {
+      "feature": "tod_sin",
+      "gain": 5.51
+    },
+    {
+      "feature": "bike",
+      "gain": 4.929
+    },
+    {
+      "feature": "total_lag1",
+      "gain": 4.308
+    }
+  ],
+  "confusion30": {
+    "labels": [
+      "low",
+      "normal",
+      "high",
+      "heavy"
+    ],
+    "matrix": [
+      [
+        56,
+        83,
+        1,
+        4
+      ],
+      [
+        63,
+        339,
+        22,
+        26
+      ],
+      [
+        1,
+        35,
+        4,
+        21
+      ],
+      [
+        2,
+        17,
+        0,
+        188
+      ]
+    ]
+  },
+  "importance30": [
+    {
+      "feature": "car",
+      "gain": 29.105
+    },
+    {
+      "feature": "total",
+      "gain": 15.421
+    },
+    {
+      "feature": "tod_cos",
+      "gain": 11.759
+    },
+    {
+      "feature": "heavy_share",
+      "gain": 8.699
+    },
+    {
+      "feature": "heavy",
+      "gain": 7.166
+    },
+    {
+      "feature": "tod_sin",
+      "gain": 7.137
+    },
+    {
+      "feature": "dow",
+      "gain": 5.876
+    },
+    {
+      "feature": "total_mean4",
+      "gain": 5.341
+    },
+    {
+      "feature": "total_std4",
+      "gain": 5.108
+    },
+    {
+      "feature": "total_lag1",
+      "gain": 5.063
+    }
+  ]
+}

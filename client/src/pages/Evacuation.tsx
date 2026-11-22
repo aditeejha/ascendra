@@ -1,6 +1,6 @@
 import { ArrowUpRight, Ban, Clock, DoorOpen, LoaderCircle, MapPin, Siren, TrafficCone, Users, type LucideIcon } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import type { EvacuationStatus, NetworkInfo, Snapshot } from '../../../shared/types';
+import type { DisasterKind, EvacuationStatus, NetworkInfo, Snapshot } from '../../../shared/types';
 import { CityMap, MapLegend, MapSkeleton } from '../components/CityMap';
 import { NodeSelect } from '../components/NodeSelect';
 import { Badge, Button, Card, CardBody, CardHeader, Field, PageHeader, Segmented, Skeleton, SkeletonGroup, Stat } from '../components/ui';
@@ -8,36 +8,38 @@ import { api } from '../lib/api';
 import { useLive } from '../lib/live';
 import { useToast } from '../lib/toast';
 
-function hopDistances(net: NetworkInfo, start: number): number[] {
-  const dist = net.nodes.map(() => Infinity);
-  const out: number[][] = net.nodes.map(() => []);
-  for (const l of net.links) out[l.from].push(l.to);
-  dist[start] = 0;
-  const queue = [start];
-  while (queue.length) {
-    const n = queue.shift()!;
-    for (const m of out[n]) {
-      if (dist[m] === Infinity) {
-        dist[m] = dist[n] + 1;
-        queue.push(m);
-      }
-    }
-  }
-  return dist;
+function distanceM(net: NetworkInfo, a: number, b: number): number {
+  const p = net.nodes[a];
+  const q = net.nodes[b];
+  const r = Math.PI / 180;
+  const dLat = (q.lat - p.lat) * r;
+  const dLon = (q.lon - p.lon) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(p.lat * r) * Math.cos(q.lat * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-function previewZone(net: NetworkInfo, center: number, radius: number) {
-  const hop = hopDistances(net, center);
-  const zone = net.nodes.filter((n) => hop[n.id] <= radius).map((n) => n.id);
+const DISASTERS: { value: DisasterKind; label: string; note: string }[] = [
+  { value: 'earthquake', label: 'Earthquake', note: 'Bridges in and within 0.5 km of the zone close for structural checks; narrow lanes slow down for debris, so evacuees are sent along wide main roads to the exits.' },
+  { value: 'flood', label: 'Flood', note: 'Bridges in the zone close and every road in it slows down, residential lanes most of all, as water collects on low streets.' },
+  { value: 'fire', label: 'Fire / gas leak', note: 'The zone is sealed to inbound traffic and lanes slow down for fire crews; everyone else is pushed outward.' },
+  { value: 'other', label: 'Other', note: 'Inbound roads close, outbound roads become one-way exit corridors and signals favour outbound traffic.' },
+];
+
+function previewZone(net: NetworkInfo, center: number, radiusKm: number, kind: DisasterKind = 'other') {
+  const dist = net.nodes.map((n) => distanceM(net, center, n.id));
+  const zone = net.nodes.filter((n) => dist[n.id] <= radiusKm * 1000).map((n) => n.id);
   const inZone = new Set(zone);
   let closed = 0;
   let contraflow = 0;
   for (const l of net.links) {
-    if (inZone.has(l.to) && hop[l.to] < hop[l.from]) closed++;
-    else if (inZone.has(l.from) && hop[l.to] > hop[l.from]) contraflow++;
+    if (inZone.has(l.to) && dist[l.to] < dist[l.from]) closed++;
+    else if (inZone.has(l.from) && dist[l.to] > dist[l.from]) contraflow++;
   }
   const exits = net.exits.filter((id) => !inZone.has(id));
-  return { zone, closed, contraflow, exits };
+  const buffer = kind === 'earthquake' ? 500 : 0;
+  const bridges =
+    kind === 'earthquake' || kind === 'flood' ? net.links.filter((l) => l.bridge && (dist[l.from] <= radiusKm * 1000 + buffer || dist[l.to] <= radiusKm * 1000 + buffer)).length : 0;
+  return { zone, closed, contraflow, exits, bridges, signals: zone.filter((id) => net.nodes[id].signal).length };
 }
 
 function placeName(net: NetworkInfo, id: number): string {
@@ -81,18 +83,20 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 
 function PlanView({ network, snap }: { network: NetworkInfo; snap: Snapshot | null }) {
   const toast = useToast();
-  const defaultCenter = network.nodes.find((n) => n.poi?.kind === 'market')?.id ?? null;
+  const radii = network.meta.evacuationRadiiKm;
+  const defaultCenter = (['station', 'market', 'bus'] as const).map((k) => network.nodes.find((n) => n.poi?.kind === k)?.id).find((id) => id !== undefined) ?? null;
   const [center, setCenter] = useState<number | null>(defaultCenter);
-  const [radius, setRadius] = useState<1 | 2>(1);
+  const [radius, setRadius] = useState<number>(radii[0] ?? 0.5);
+  const [kind, setKind] = useState<DisasterKind>('earthquake');
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
-  const preview = useMemo(() => (center === null ? null : previewZone(network, center, radius)), [network, center, radius]);
+  const preview = useMemo(() => (center === null ? null : previewZone(network, center, radius, kind)), [network, center, radius, kind]);
 
   const activate = async () => {
     if (center === null) return;
     setSending(true);
     try {
-      await api<EvacuationStatus>('/evacuation', { method: 'POST', body: { center, radius } });
+      await api<EvacuationStatus>('/evacuation', { method: 'POST', body: { center, radiusKm: radius, kind } });
       toast('success', `Evacuation activated around ${placeName(network, center)}.`);
       setConfirming(false);
     } catch (e) {
@@ -120,6 +124,20 @@ function PlanView({ network, snap }: { network: NetworkInfo; snap: Snapshot | nu
               />
             </Field>
             <div>
+              <p className="mb-1.5 text-[13px] font-medium text-ink">Type of disaster</p>
+              <Segmented
+                ariaLabel="Type of disaster"
+                size="sm"
+                value={kind}
+                onChange={(k) => {
+                  setKind(k);
+                  setConfirming(false);
+                }}
+                options={DISASTERS.map((d) => ({ value: d.value, label: d.label }))}
+              />
+              <p className="mt-2 text-[12.5px] text-muted">{DISASTERS.find((d) => d.value === kind)?.note}</p>
+            </div>
+            <div>
               <p className="mb-1.5 text-[13px] font-medium text-ink">Zone radius</p>
               <Segmented
                 ariaLabel="Zone radius"
@@ -128,16 +146,13 @@ function PlanView({ network, snap }: { network: NetworkInfo; snap: Snapshot | nu
                   setRadius(r);
                   setConfirming(false);
                 }}
-                options={[
-                  { value: 1, label: '1 junction' },
-                  { value: 2, label: '2 junctions' },
-                ]}
+                options={radii.map((r) => ({ value: r, label: `${r} km` }))}
               />
             </div>
             {preview && (
               <div className="grid grid-cols-2 gap-3">
                 <Metric label="Junctions in zone" value={preview.zone.length} />
-                <Metric label="Exit routes" value={preview.exits.length} />
+                <Metric label={kind === 'earthquake' || kind === 'flood' ? 'Bridge links closed' : 'Signals in zone'} value={kind === 'earthquake' || kind === 'flood' ? preview.bridges : preview.signals} />
                 <Metric label="Inbound links closed" value={preview.closed} />
                 <Metric label="Contraflow corridors" value={preview.contraflow} />
               </div>
@@ -174,13 +189,13 @@ function PlanView({ network, snap }: { network: NetworkInfo; snap: Snapshot | nu
           title="Zone preview"
           subtitle={center !== null ? `Centred on ${placeName(network, center)}` : 'Select a centre to preview the zone'}
           icon={Siren}
-          actions={preview ? <Badge tone="red">{preview.zone.length} junctions</Badge> : undefined}
+          actions={preview ? <Badge tone="red">{preview.zone.length} junctions in zone</Badge> : undefined}
         />
         <div className="p-3">
           <CityMap
             network={network}
             snap={snap}
-            zone={preview?.zone ?? null}
+            zoneCircle={center !== null ? { node: center, radiusKm: radius } : null}
             selectedNode={center}
             onNodeClick={(id) => {
               setCenter(id);
@@ -192,7 +207,7 @@ function PlanView({ network, snap }: { network: NetworkInfo; snap: Snapshot | nu
         {preview && (
           <div className="border-t border-line px-5 py-3 text-[13px] text-muted">
             Residents leave through{' '}
-            <span className="font-medium text-ink">{preview.exits.map((id) => placeName(network, id)).join(', ') || 'the ring road'}</span>.
+            <span className="font-medium text-ink">{preview.exits.map((id) => placeName(network, id)).join(', ') || 'the nearest boundary roads'}</span>.
           </div>
         )}
       </Card>
@@ -226,13 +241,16 @@ function ActiveView({ network, snap, evac }: { network: NetworkInfo; snap: Snaps
             <span className="absolute -top-0.5 -right-0.5 size-3 animate-pulse rounded-full bg-white" />
           </span>
           <div>
-            <p className="text-sm font-semibold">Evacuation in progress around {placeName(network, evac.center)}</p>
+            <p className="text-sm font-semibold">
+              {DISASTERS.find((d) => d.value === evac.kind)?.label ?? 'Emergency'} evacuation in progress around {placeName(network, evac.center)}
+            </p>
             <p className="text-[13px] text-red-100">
-              Activated at {evac.startedClock} · radius {evac.radius} {evac.radius === 1 ? 'junction' : 'junctions'}
+              Activated at {evac.startedClock} · radius {evac.radiusKm} km
             </p>
           </div>
         </div>
         <button
+          type="button"
           onClick={end}
           disabled={ending}
           className="inline-flex h-10 items-center gap-2 rounded-lg bg-white px-4 text-sm font-semibold text-red-700 shadow-sm transition-colors hover:bg-red-50 disabled:opacity-60"
@@ -259,7 +277,7 @@ function ActiveView({ network, snap, evac }: { network: NetworkInfo; snap: Snaps
         <Card className="lg:col-span-2">
           <CardHeader title="Evacuation zone" subtitle="Dashed red area is the zone; blue arrows are contraflow exit corridors" icon={Siren} />
           <div className="p-3">
-            <CityMap network={network} snap={snap} zone={evac.zoneNodes} selectedNode={evac.center} ariaLabel="Active evacuation zone" />
+            <CityMap network={network} snap={snap} zoneCircle={{ node: evac.center, radiusKm: evac.radiusKm }} selectedNode={evac.center} ariaLabel="Active evacuation zone" />
           </div>
           <div className="border-t border-line px-5 py-3">
             <MapLegend />
@@ -286,8 +304,10 @@ function ActiveView({ network, snap, evac }: { network: NetworkInfo; snap: Snaps
             <CardBody className="grid grid-cols-2 gap-3">
               <Metric label="Inbound links closed" value={evac.closedLinks.length} />
               <Metric label="Contraflow corridors" value={evac.contraflowLinks.length} />
-              <Metric label="Signals in evacuation mode" value={evac.zoneNodes.length} />
+              <Metric label="Signals in evacuation mode" value={evac.zoneNodes.filter((id) => network.nodes[id].signal).length} />
               <Metric label="Total vehicles moved" value={total} />
+              <Metric label="Bridge links closed" value={evac.bridgesClosed.length} />
+              <Metric label="Roads slowed (debris / water)" value={evac.slowedLinks} />
             </CardBody>
           </Card>
         </div>

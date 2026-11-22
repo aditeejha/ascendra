@@ -2,8 +2,9 @@ import clsx from 'clsx';
 import { Cpu, MousePointerClick, Siren, SlidersHorizontal, TrafficCone, Wrench, X } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { NetworkInfo, SignalDetail, SignalMode, Snapshot } from '../../../shared/types';
+import type { ForecastResponse, JunctionOutlook, NetworkInfo, SignalDetail, SignalMode, Snapshot } from '../../../shared/types';
 import { CityMap, MapSkeleton } from '../components/CityMap';
+import { SituationBadge } from '../components/JunctionOutlook';
 import {
   Badge,
   Button,
@@ -289,6 +290,7 @@ function SignalPanel({
   signal,
   network,
   snap,
+  outlook,
   canEdit,
   onSelect,
   onClose,
@@ -297,6 +299,7 @@ function SignalPanel({
   signal: SignalDetail | null;
   network: NetworkInfo;
   snap: Snapshot | null;
+  outlook: JunctionOutlook | null;
   canEdit: boolean;
   onSelect: (id: number) => void;
   onClose: () => void;
@@ -346,6 +349,36 @@ function SignalPanel({
             <span className="tabular">{signal.switches}</span>
           </DetailRow>
         </div>
+      </CardBody>
+      <CardBody className="border-t border-line">
+        <p className="text-sm font-semibold text-ink">Junction outlook</p>
+        <p className="mb-3 text-xs text-muted">XGBoost trained on real camera counts (Kaggle), from the last 15-minute count on the busiest approach</p>
+        {outlook ? (
+          <div className="space-y-2.5 text-[13px]">
+            <DetailRow label={`Counted on ${outlook.approachRoad}`}>
+              <span className="tabular">
+                {outlook.counts.total} vehicles ({outlook.counts.car} cars, {outlook.counts.bike} two-wheelers, {outlook.counts.heavy} heavy)
+              </span>
+            </DetailRow>
+            <DetailRow label="Situation now">
+              <SituationBadge value={outlook.situationNow} />
+            </DetailRow>
+            <DetailRow label="In 15 minutes">
+              <span className="inline-flex items-center gap-2">
+                <SituationBadge value={outlook.situation15} prob={Math.max(...outlook.probs15)} />
+                <span className="tabular text-muted">≈ {outlook.count15} vehicles</span>
+              </span>
+            </DetailRow>
+            <DetailRow label="In 30 minutes">
+              <span className="inline-flex items-center gap-2">
+                <SituationBadge value={outlook.situation30} prob={Math.max(...outlook.probs30)} />
+                <span className="tabular text-muted">≈ {outlook.count30} vehicles</span>
+              </span>
+            </DetailRow>
+          </div>
+        ) : (
+          <p className="rounded-lg bg-navy-50 px-3 py-2 text-xs text-muted">The outlook appears after the next 15-minute count at this junction.</p>
+        )}
       </CardBody>
       <CardBody className="border-t border-line">
         <p className="mb-3 text-sm font-semibold text-ink">Timing plan</p>
@@ -414,6 +447,7 @@ export function SignalsPage() {
   const toast = useToast();
   const canEdit = role === 'controller';
   const { data: signals, refresh } = usePoll<SignalDetail[]>('/signals', 2000);
+  const forecast = usePoll<ForecastResponse>('/forecast', 30000);
   const [params, setParams] = useSearchParams();
   const [savingAdaptive, setSavingAdaptive] = useState(false);
   const nodeParam = params.get('node');
@@ -439,7 +473,7 @@ export function SignalsPage() {
   const header = (
     <PageHeader
       title="Traffic signals"
-      description="Live phase state, queues and timing plans for every signalised junction. Adaptive junctions are timed by the reinforcement-learning agent with forecast-driven priority."
+      description="Live phase state, queues, timing plans and a 15–30 minute outlook for every signalised junction. Adaptive junctions are timed by the reinforcement-learning agent with forecast-driven priority."
       actions={
         <div className="w-full rounded-xl border border-line bg-white px-4 sm:w-80">
           <Toggle
@@ -511,6 +545,7 @@ export function SignalsPage() {
             signal={current}
             network={network}
             snap={snap}
+            outlook={current ? (forecast.data?.junctions.find((j) => j.nodeId === current.nodeId) ?? null) : null}
             canEdit={canEdit}
             onSelect={select}
             onClose={() => select(null)}

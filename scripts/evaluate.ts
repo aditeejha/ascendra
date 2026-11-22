@@ -1,16 +1,18 @@
 import { runEvaluation } from '../server/sim/evaluation';
-import { loadForecaster, loadPolicy, saveJson } from '../server/sim/models';
+import { loadForecaster, loadJunctionModel, loadPolicy, saveJson } from '../server/sim/models';
 import { buildNetwork } from '../server/sim/network';
 
 const net = buildNetwork();
 const policy = loadPolicy();
 const forecaster = loadForecaster();
+const junctionModel = loadJunctionModel();
 console.log(`Policy: ${policy ? 'loaded' : 'missing (max-pressure fallback)'}  Forecaster: ${forecaster ? 'loaded' : 'missing'}`);
 
 const started = Date.now();
 const result = await runEvaluation(net, policy, forecaster, {
   seeds: Number(process.env.SEEDS ?? 3),
   durationMin: 60,
+  junctionModel,
   onProgress: (done, total) => process.stdout.write(`\rrun ${done}/${total}`),
 });
 process.stdout.write('\n');

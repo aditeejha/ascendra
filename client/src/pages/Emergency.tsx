@@ -180,6 +180,7 @@ function DispatchForm({
       <div className="flex flex-wrap gap-1.5">
         {hospitals.map((h) => (
           <button
+            type="button"
             key={h.id}
             onClick={() => setTo(h.id)}
             disabled={!canDispatch}

@@ -1,5 +1,6 @@
 export const FEATURES = [
   'score',
+  'score_mean5',
   'score_lag5',
   'score_lag10',
   'score_lag15',
@@ -23,6 +24,15 @@ export const FEATURES = [
 
 export const HORIZONS = [15, 30] as const;
 export type Horizon = (typeof HORIZONS)[number];
+export const TARGET_WINDOW_MIN = 5;
+
+export function tailMean(values: ArrayLike<number>, count: number, fallback: number): number {
+  const from = Math.max(0, values.length - count);
+  if (from === values.length) return fallback;
+  let sum = 0;
+  for (let i = from; i < values.length; i++) sum += values[i];
+  return sum / (values.length - from);
+}
 
 export interface TreeArrays {
   left: number[];
@@ -47,7 +57,7 @@ export interface ForecasterFile {
   metrics: Record<string, number>;
 }
 
-interface CompiledTree {
+export interface CompiledTree {
   left: Int32Array;
   right: Int32Array;
   feature: Int32Array;
@@ -55,7 +65,7 @@ interface CompiledTree {
   defaultLeft: Uint8Array;
 }
 
-function compile(tree: TreeArrays): CompiledTree {
+export function compile(tree: TreeArrays): CompiledTree {
   return {
     left: Int32Array.from(tree.left),
     right: Int32Array.from(tree.right),
@@ -65,7 +75,7 @@ function compile(tree: TreeArrays): CompiledTree {
   };
 }
 
-function evalTree(tree: CompiledTree, x: Float32Array): number {
+export function evalTree(tree: CompiledTree, x: Float32Array): number {
   let node = 0;
   while (tree.left[node] !== -1) {
     const v = x[tree.feature[node]];
@@ -75,12 +85,16 @@ function evalTree(tree: CompiledTree, x: Float32Array): number {
   return tree.threshold[node];
 }
 
+export function matchesSimulator(file: ForecasterFile): boolean {
+  return file.features.join(',') === FEATURES.join(',');
+}
+
 export class Forecaster {
   readonly file: ForecasterFile;
   private compiled: Record<string, CompiledTree[]>;
 
   constructor(file: ForecasterFile) {
-    if (file.features.join(',') !== FEATURES.join(',')) {
+    if (!matchesSimulator(file)) {
       throw new Error('Forecaster feature list does not match the simulator');
     }
     this.file = file;

@@ -1,0 +1,171 @@
+{
+  "city": "Deoghar",
+  "region": "Jharkhand",
+  "country": "India",
+  "geocodeQuery": "Deoghar, Jharkhand, India",
+  "timezone": "Asia/Kolkata",
+  "studyRadiusKm": 3.5,
+  "mapZoom": 15,
+  "roads": {
+    "trunk": "highway",
+    "trunk_link": "highway",
+    "primary": "arterial",
+    "primary_link": "arterial",
+    "secondary": "arterial",
+    "secondary_link": "arterial",
+    "tertiary": "street",
+    "tertiary_link": "street",
+    "unclassified": "street",
+    "residential": "lane",
+    "living_street": "lane"
+  },
+  "kindDefaults": {
+    "highway": {
+      "lanesPerDirection": 2,
+      "speedKmh": 50,
+      "maxWeightT": null
+    },
+    "arterial": {
+      "lanesPerDirection": 1,
+      "speedKmh": 40,
+      "maxWeightT": null
+    },
+    "street": {
+      "lanesPerDirection": 1,
+      "speedKmh": 30,
+      "maxWeightT": null
+    },
+    "lane": {
+      "lanesPerDirection": 1,
+      "speedKmh": 20,
+      "maxWeightT": 5
+    }
+  },
+  "network": {
+    "mergeJunctionsWithinM": 18,
+    "pruneDeadEndKinds": [
+      "lane"
+    ],
+    "poiSnapM": 600,
+    "signalSnapM": 35,
+    "inferSignals": {
+      "minMajorSegments": 3,
+      "orMajorSegments": 2,
+      "withStreetSegments": 2,
+      "minSpacingM": 60
+    },
+    "restrictedZoneKm": 1.2,
+    "cameraSites": 8,
+    "exitMergeM": 400,
+    "hospitalNameExclude": "store|pharmacy|chemist|clinic",
+    "landmarkNamingM": 400
+  },
+  "rules": {
+    "weeklyOff": [
+      "Sunday"
+    ],
+    "freightBanHours": [
+      [
+        8,
+        11
+      ],
+      [
+        17,
+        20
+      ]
+    ],
+    "platePrefix": "JH 15",
+    "outOfStatePlates": [
+      "BR 01",
+      "WB 23",
+      "JH 01",
+      "JH 10"
+    ]
+  },
+  "demand": {
+    "baseTripsPerSecond": 2.2,
+    "minTripKm": 0.8,
+    "weekdayProfile": [
+      0.08,
+      0.05,
+      0.04,
+      0.04,
+      0.07,
+      0.18,
+      0.42,
+      0.82,
+      1.0,
+      0.94,
+      0.72,
+      0.62,
+      0.64,
+      0.62,
+      0.6,
+      0.66,
+      0.8,
+      0.97,
+      1.0,
+      0.86,
+      0.62,
+      0.42,
+      0.26,
+      0.13
+    ],
+    "offDayProfile": [
+      0.1,
+      0.07,
+      0.05,
+      0.04,
+      0.05,
+      0.08,
+      0.18,
+      0.32,
+      0.48,
+      0.6,
+      0.7,
+      0.74,
+      0.76,
+      0.74,
+      0.72,
+      0.72,
+      0.74,
+      0.78,
+      0.76,
+      0.66,
+      0.52,
+      0.38,
+      0.24,
+      0.14
+    ],
+    "twoWheelerShare": {
+      "day": 0.45,
+      "night": 0.3
+    },
+    "cargoShare": {
+      "day": 0.1,
+      "restricted": 0.04,
+      "night": 0.25
+    },
+    "connectedShare": 0.3,
+    "busShare": {
+      "day": 0.03,
+      "night": 0.01
+    }
+  },
+  "evacuation": {
+    "radiiKm": [
+      0.5,
+      1,
+      1.5
+    ]
+  },
+  "live": {
+    "weatherIntervalMin": 15,
+    "tomtom": {
+      "flowSamples": 20,
+      "flowIntervalMin": 15,
+      "incidentIntervalMin": 10,
+      "dailyBudget": 2300
+    }
+  }
+}

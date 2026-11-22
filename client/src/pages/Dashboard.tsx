@@ -21,6 +21,7 @@ import { Link } from 'react-router-dom';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import type { AnalyticsLive, FeedEvent, ForecastResponse, NetworkInfo, SignalDetail, Snapshot } from '../../../shared/types';
 import { CityMap, MapLegend, MapSkeleton } from '../components/CityMap';
+import { JunctionOutlookCard } from '../components/JunctionOutlook';
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, LevelBadge, PageHeader, Segmented, Skeleton, SkeletonGroup, Stat } from '../components/ui';
 import { scoreColor, linkLabel, pct } from '../lib/format';
 import { usePoll } from '../lib/hooks';
@@ -78,7 +79,7 @@ export function DashboardPage() {
   if (!network || !snap) return <DashboardSkeleton />;
 
   const k = snap.kpis;
-  const segmentsTotal = network.links.length / 2;
+  const segmentsTotal = network.meta.segmentCount;
   const predicted = forecast.data?.hotspots.length ?? 0;
   const focusSignal = focus !== null ? signals.data?.find((s) => s.nodeId === focus) ?? null : null;
 
@@ -86,7 +87,7 @@ export function DashboardPage() {
     <>
       <PageHeader
         title="City operations"
-        description={`Live view of the network on ${snap.day}. Signals adapt in real time, congestion is forecast 15–30 minutes ahead and emergency vehicles get green waves.`}
+        description={`Live view of ${network.meta.city}'s real road network on ${snap.day}. Signals adapt in real time, congestion is forecast 15–30 minutes ahead and emergency vehicles get green waves.`}
         actions={
           can('map') ? (
             <Link to="/map">
@@ -158,17 +159,18 @@ export function DashboardPage() {
             <div className="overflow-hidden rounded-xl ring-1 ring-line">
               <CityMap network={network} snap={snap} scores={layerScores} showVehicles={layer === 'now'} selectedNode={focus} onNodeClick={setSelected} />
             </div>
-            <MapLegend className="px-2 pt-3" />
+            <MapLegend className="px-2 pt-3" showLive />
           </div>
         </Card>
         <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           <HotspotsCard network={network} forecast={forecast.data} loading={forecast.loading} />
           <InterventionsCard forecast={forecast.data} loading={forecast.loading} />
         </div>
+        <JunctionOutlookCard forecast={forecast.data} loading={forecast.loading} onSelect={setSelected} />
         </div>
 
         <div className="flex min-w-0 flex-col gap-6">
-          <IntersectionCard network={network} snap={snap} signal={focusSignal} canEdit={can('signals')} />
+          <IntersectionCard network={network} snap={snap} signal={focusSignal} nodeId={focus} signalsLoaded={Boolean(signals.data)} canEdit={can('signals')} />
           <AlertsCard events={events.data} loading={events.loading} />
           <TrendCard analytics={analytics.data} loading={analytics.loading} />
         </div>
@@ -177,7 +179,42 @@ export function DashboardPage() {
   );
 }
 
-function IntersectionCard({ network, snap, signal, canEdit }: { network: NetworkInfo; snap: Snapshot; signal: SignalDetail | null; canEdit: boolean }) {
+function IntersectionCard({
+  network,
+  snap,
+  signal,
+  nodeId,
+  signalsLoaded,
+  canEdit,
+}: {
+  network: NetworkInfo;
+  snap: Snapshot;
+  signal: SignalDetail | null;
+  nodeId: number | null;
+  signalsLoaded: boolean;
+  canEdit: boolean;
+}) {
+  if (!signal && signalsLoaded && nodeId !== null) {
+    const node = network.nodes[nodeId];
+    const approaches = network.links.filter((l) => l.to === nodeId);
+    const queued = approaches.reduce((a, l) => a + (snap.linkQueue[l.id] ?? 0), 0);
+    return (
+      <Card>
+        <CardHeader title="Selected junction" icon={TrafficCone} />
+        <CardBody className="space-y-2">
+          <p className="text-base font-semibold text-ink">{node.poi ? `${node.poi.name}` : node.name}</p>
+          {node.poi && <p className="text-[13px] text-muted">{node.name}</p>}
+          <div className="flex flex-wrap gap-1.5">
+            <Badge>{node.key}</Badge>
+            <Badge tone="navy">Give-way junction · no signal</Badge>
+          </div>
+          <p className="text-[13px] text-muted">
+            {approaches.length} approaches, {queued} vehicles queued now. Traffic here gives way without a signal, as most junctions in {network.meta.city} do; pick a junction with a signal head to see its timing.
+          </p>
+        </CardBody>
+      </Card>
+    );
+  }
   if (!signal) {
     return (
       <Card>

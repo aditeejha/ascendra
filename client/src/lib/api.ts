@@ -25,3 +25,7 @@ export async function api<T>(path: string, options: { method?: string; body?: un
   if (!res.ok) throw new ApiError(data?.error ?? `Request failed (${res.status})`, res.status);
   return data as T;
 }
+
+export function withRole(path: string): string {
+  return `/api${path}${path.includes('?') ? '&' : '?'}role=${currentRole}`;
+}

@@ -1,21 +1,29 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { z, ZodError } from 'zod';
 import type {
+  CivicAction,
   CivicCategory,
+  CivicReport,
   CivicStatus,
   Counters,
   EvaluationResult,
+  LiveStatus,
+  RegisteredVehicle,
   Role,
   Severity,
+  Snapshot,
   VehicleClass,
 } from '../shared/types';
+import { cityConfig } from './config';
 import type { Repo } from './repo';
 import type { Simulation } from './sim/engine';
 import { runEvaluation } from './sim/evaluation';
 import type { Forecaster } from './sim/forecaster';
+import type { Replay } from './live/replay';
+import type { JunctionForecaster } from './sim/junction';
 import { saveJson } from './sim/models';
 import { publicNetwork, type Network } from './sim/network';
 import type { QPolicy } from './sim/rl';
@@ -33,15 +41,23 @@ export interface AppContext {
   repo: Repo;
   policy: QPolicy | null;
   forecaster: Forecaster | null;
+  junctionModel: JunctionForecaster | null;
   evaluation: EvaluationState;
   civicIncidents: Map<number, string>;
   counters: Counters;
   refreshCounters: () => Promise<void>;
   clients: Set<Response>;
+  frame: () => Snapshot;
+  liveStatus: () => LiveStatus;
+  resync: () => Promise<void>;
+  applyLiveWeather: () => void;
+  replay: Replay;
+  startReplay: (speed: number) => Promise<void>;
+  stopReplay: () => Promise<void>;
 }
 
 const ROLES: Role[] = ['controller', 'authority', 'citizen', 'driver', 'emergency'];
-const CLASSES = ['private', 'two_wheeler', 'cargo', 'emergency'] as const;
+const CLASSES = ['private', 'two_wheeler', 'cargo', 'bus', 'emergency'] as const;
 const CATEGORIES = [
   'pothole',
   'waterlogging',
@@ -51,10 +67,66 @@ const CATEGORIES = [
   'illegal_parking',
   'streetlight',
 ] as const;
-const CIVIC_STATUSES = ['reported', 'verified', 'in_progress', 'resolved', 'rejected'] as const;
+const CIVIC_STATUSES = ['reported', 'verified', 'assigned', 'in_progress', 'resolved', 'closed', 'reopened', 'rejected'] as const;
+const CIVIC_ACTIONS = ['verify', 'reject', 'assign', 'start', 'resolve', 'close', 'reopen'] as const;
+const ACTION_STATUS: Record<CivicAction, CivicStatus> = {
+  verify: 'verified',
+  reject: 'rejected',
+  assign: 'assigned',
+  start: 'in_progress',
+  resolve: 'resolved',
+  close: 'closed',
+  reopen: 'reopened',
+};
+const STATUS_ACTION: Partial<Record<CivicStatus, CivicAction>> = Object.fromEntries(Object.entries(ACTION_STATUS).map(([a, st]) => [st, a])) as Partial<Record<CivicStatus, CivicAction>>;
+const ACTION_FROM: Record<CivicAction, CivicStatus[]> = {
+  verify: ['reported', 'reopened'],
+  reject: ['reported', 'verified', 'reopened'],
+  assign: ['verified', 'assigned', 'reopened'],
+  start: ['verified', 'assigned', 'reopened'],
+  resolve: ['verified', 'assigned', 'in_progress', 'reopened'],
+  close: ['resolved'],
+  reopen: ['resolved', 'closed'],
+};
+const STAFF_ACTIONS: CivicAction[] = ['verify', 'reject', 'assign', 'start', 'resolve'];
+const ACTIVE_CIVIC: CivicStatus[] = ['verified', 'assigned', 'in_progress', 'reopened'];
+const PHOTO = z
+  .string()
+  .max(2_500_000, 'The photo is too large; use an image under about 1.5 MB.')
+  .regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/, 'Upload a JPEG, PNG or WebP photo.');
+const PHONE = z
+  .string()
+  .trim()
+  .regex(/^[+]?[0-9 -]{7,15}$/, 'Enter a valid phone number.');
+
+function isStaff(role: Role): boolean {
+  return role === 'controller' || role === 'authority';
+}
+
+function maskPhone(phone: string | null): string | null {
+  if (!phone) return null;
+  const digits = phone.replace(/\D/g, '');
+  return digits.length <= 4 ? '••••' : `${digits.slice(0, 2)}${'•'.repeat(Math.max(2, digits.length - 5))}${digits.slice(-3)}`;
+}
+
+function redactVehicle(v: RegisteredVehicle, role: Role): RegisteredVehicle {
+  if (isStaff(role) || ['108', '101', '112'].includes(v.phone ?? '')) return v;
+  return { ...v, phone: maskPhone(v.phone), email: null, address: null, licenceNo: null };
+}
+
+function sendDataUrl(res: Response, dataUrl: string | null): void {
+  const m = dataUrl?.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+  if (!m) {
+    res.status(404).json({ error: 'No photo.' });
+    return;
+  }
+  res.setHeader('Content-Type', m[1]);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.end(Buffer.from(m[2], 'base64'));
+}
 
 function roleOf(req: Request): Role {
-  const header = req.header('x-role') as Role | undefined;
+  const header = (req.header('x-role') ?? (req.method === 'GET' && typeof req.query.role === 'string' ? req.query.role : undefined)) as Role | undefined;
   return header && ROLES.includes(header) ? header : 'citizen';
 }
 
@@ -87,10 +159,33 @@ function civicImpact(category: CivicCategory, severity: Severity) {
   }
 }
 
+export function applyCivicImpact(ctx: AppContext, report: CivicReport): boolean {
+  const node = report.nodeId ?? (report.linkId !== null ? ctx.net.links[report.linkId].to : null);
+  if (report.category === 'broken_signal' && node !== null) {
+    ctx.sim.setSignalFault(node, true);
+    return true;
+  }
+  if (report.linkId === null) return false;
+  const impact = civicImpact(report.category, report.severity);
+  if (!impact) return false;
+  const link = ctx.net.links[report.linkId];
+  const incidentId = ctx.sim.addIncident({
+    linkIds: impact.both && link.reverse >= 0 ? [link.id, link.reverse] : [link.id],
+    source: 'civic',
+    durationS: null,
+    lanesLost: impact.lanesLost,
+    speedFactor: impact.speedFactor,
+    closes: impact.closes,
+    label: `${report.category.replace('_', ' ')} on ${link.road}`,
+  });
+  ctx.civicIncidents.set(report.id, incidentId);
+  return true;
+}
+
 function fineFor(cls: VehicleClass, speed: number, limit: number): number {
   const excess = speed / limit - 1;
   const base = excess > 0.2 ? 2000 : 1000;
-  return cls === 'cargo' ? base * 2 : base;
+  return cls === 'cargo' || cls === 'bus' ? base * 2 : base;
 }
 
 function emergencyLabel(agency: string | null): string {
@@ -102,9 +197,9 @@ function emergencyLabel(agency: string | null): string {
 }
 
 export function createApp(ctx: AppContext) {
-  const { net, sim, repo } = ctx;
+  const { net, repo } = ctx;
   const app = express();
-  app.use(express.json({ limit: '100kb' }));
+  app.use(express.json({ limit: '6mb' }));
   const nodeIdSchema = z.number().int().min(0).max(net.nodes.length - 1);
   const linkIdSchema = z.number().int().min(0).max(net.links.length - 1);
 
@@ -112,13 +207,23 @@ export function createApp(ctx: AppContext) {
     repo.audit(roleOf(req), action, entity, id, details ?? null);
 
   app.get('/api/health', (req, res) => {
+    const live = ctx.liveStatus();
     res.json({
       ok: true,
       database: repo.mode,
       forecaster: Boolean(ctx.forecaster),
       signalPolicy: Boolean(ctx.policy),
-      simClock: sim.clock,
+      junctionModel: Boolean(ctx.junctionModel),
+      simClock: ctx.sim.clock,
+      city: live.city.name,
+      liveClock: ctx.sim.settings.liveClock,
+      weather: live.weather.mode,
+      traffic: live.traffic.status,
     });
+  });
+
+  app.get('/api/live', (req, res) => {
+    res.json(ctx.liveStatus());
   });
 
   app.get('/api/network', (req, res) => {
@@ -126,7 +231,7 @@ export function createApp(ctx: AppContext) {
   });
 
   app.get('/api/state', (req, res) => {
-    res.json({ ...sim.snapshot(), counters: ctx.counters });
+    res.json(ctx.frame());
   });
 
   app.get('/api/stream', (req, res) => {
@@ -136,21 +241,23 @@ export function createApp(ctx: AppContext) {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    res.write(`data: ${JSON.stringify({ ...sim.snapshot(), counters: ctx.counters })}\n\n`);
+    res.write(`data: ${JSON.stringify(ctx.frame())}\n\n`);
     ctx.clients.add(res);
     req.on('close', () => ctx.clients.delete(res));
   });
 
   app.get('/api/events', (req, res) => {
-    res.json(sim.recentEvents(40));
+    res.json(ctx.sim.recentEvents(40));
   });
 
   app.get('/api/settings', (req, res) => {
-    res.json(sim.settings);
+    res.json(ctx.sim.settings);
   });
 
   const settingsSchema = z
     .object({
+      liveClock: z.boolean(),
+      liveWeather: z.boolean(),
       speed: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(8), z.literal(16)]),
       paused: z.boolean(),
       weather: z.enum(['clear', 'rain', 'heavy_rain', 'fog']),
@@ -164,14 +271,27 @@ export function createApp(ctx: AppContext) {
 
   app.patch('/api/settings', allow('controller'), async (req, res) => {
     const update = settingsSchema.parse(req.body);
-    const { weather, ...rest } = update;
-    Object.assign(sim.settings, rest);
-    if (weather && weather !== sim.settings.weather) {
-      sim.setWeather(weather);
-      sim.pushEvent('system', 'Weather updated', `Conditions set to ${weather.replace('_', ' ')}`, 'info');
+    const { weather, liveClock, liveWeather, ...rest } = update;
+    const resync = liveClock === true && !ctx.sim.settings.liveClock;
+    Object.assign(ctx.sim.settings, rest);
+    if (liveClock !== undefined) ctx.sim.settings.liveClock = liveClock;
+    if (weather && liveWeather !== true) {
+      ctx.sim.settings.liveWeather = false;
+      if (weather !== ctx.sim.settings.weather) {
+        ctx.sim.setWeather(weather);
+        ctx.sim.pushEvent('system', 'Weather set manually', `Conditions set to ${weather.replace('_', ' ')}`, 'info');
+      }
+    }
+    if (liveWeather !== undefined) {
+      ctx.sim.settings.liveWeather = liveWeather;
+      if (liveWeather) ctx.applyLiveWeather();
+    }
+    if (resync) {
+      if (ctx.replay.running || ctx.sim.demandOverridden) await ctx.stopReplay();
+      else await ctx.resync();
     }
     if (update.adaptive !== undefined) {
-      sim.pushEvent(
+      ctx.sim.pushEvent(
         'signal',
         update.adaptive ? 'Adaptive control enabled' : 'Adaptive control disabled',
         update.adaptive ? 'RL agent and forecasts drive signal timing' : 'All signals run their fixed-time plans',
@@ -179,11 +299,11 @@ export function createApp(ctx: AppContext) {
       );
     }
     await audit(req, 'update_settings', 'settings', null, update);
-    res.json(sim.settings);
+    res.json(ctx.sim.settings);
   });
 
   app.get('/api/signals', (req, res) => {
-    res.json(sim.signalDetails());
+    res.json(ctx.sim.signalDetails());
   });
 
   const signalSchema = z.object({
@@ -195,15 +315,15 @@ export function createApp(ctx: AppContext) {
   app.patch('/api/signals/:id', allow('controller'), async (req, res) => {
     const id = nodeIdSchema.parse(idParam(req));
     const body = signalSchema.parse(req.body);
-    const detail = sim.configureSignal(id, { mode: body.mode, plan: { greenNS: body.greenNS, greenEW: body.greenEW } });
+    const detail = ctx.sim.configureSignal(id, { mode: body.mode, plan: { greenNS: body.greenNS, greenEW: body.greenEW } });
     await repo.logSignalChange(id, detail.mode, detail.plan.greenNS, detail.plan.greenEW, roleOf(req));
     await audit(req, 'update_signal', 'signal', id, body);
-    sim.pushEvent('signal', 'Signal plan updated', `${detail.name}: ${detail.mode}, NS ${detail.plan.greenNS}s / EW ${detail.plan.greenEW}s`, 'info');
+    ctx.sim.pushEvent('signal', 'Signal plan updated', `${detail.name}: ${detail.mode}, NS ${detail.plan.greenNS}s / EW ${detail.plan.greenEW}s`, 'info');
     res.json(detail);
   });
 
   app.get('/api/forecast', (req, res) => {
-    res.json(sim.forecast());
+    res.json(ctx.sim.forecast());
   });
 
   const routeSchema = z.object({
@@ -220,11 +340,16 @@ export function createApp(ctx: AppContext) {
       return;
     }
     const classes: VehicleClass[] = body.vehicleClass ? [body.vehicleClass] : [...CLASSES];
-    res.json({ from: body.from, to: body.to, plans: classes.map((c) => sim.planRoute(body.from, body.to, c, body.weightT)) });
+    res.json({ from: body.from, to: body.to, plans: classes.map((c) => ctx.sim.planRoute(body.from, body.to, c, body.weightT)) });
   });
 
   app.get('/api/vehicles', async (req, res) => {
-    res.json(await repo.listVehicles());
+    const role = roleOf(req);
+    res.json((await repo.listVehicles()).map((v) => redactVehicle(v, role)));
+  });
+
+  app.get('/api/vehicles/:id/photo', allow('authority', 'controller'), async (req, res) => {
+    sendDataUrl(res, await repo.vehiclePhoto(idParam(req)));
   });
 
   const vehicleSchema = z.object({
@@ -235,12 +360,16 @@ export function createApp(ctx: AppContext) {
       .regex(/^[A-Z]{2}\s?\d{1,2}\s?[A-Z]{0,3}\s?\d{1,4}$/, 'Use an Indian registration format, e.g. JH 15 AB 1234'),
     vehicleClass: z.enum(CLASSES),
     ownerName: z.string().trim().min(2).max(80),
-    phone: z.string().trim().max(20).optional().nullable(),
+    phone: PHONE.optional().nullable().or(z.literal('')),
+    email: z.string().trim().email('Enter a valid email address.').max(120).optional().nullable().or(z.literal('')),
+    address: z.string().trim().max(200).optional().nullable(),
+    licenceNo: z.string().trim().toUpperCase().max(30).optional().nullable(),
+    ownerPhoto: PHOTO.optional().nullable(),
     weightT: z.number().min(0.1).max(60).optional().nullable(),
     agency: z.string().trim().max(80).optional().nullable(),
   });
 
-  app.post('/api/vehicles', allow('driver', 'controller', 'authority', 'emergency'), async (req, res) => {
+  app.post('/api/vehicles', allow('driver', 'citizen', 'controller', 'authority', 'emergency'), async (req, res) => {
     const body = vehicleSchema.parse(req.body);
     const plate = body.plate.replace(/\s+/g, ' ');
     if (await repo.findPlate(plate)) {
@@ -251,8 +380,8 @@ export function createApp(ctx: AppContext) {
       res.status(400).json({ error: 'Cargo vehicles need a gross weight for route restrictions.' });
       return;
     }
-    const vehicle = await repo.createVehicle({ ...body, plate });
-    await audit(req, 'register_vehicle', 'vehicle', vehicle.id, { plate, vehicleClass: body.vehicleClass });
+    const vehicle = await repo.createVehicle({ ...body, plate, phone: body.phone || null, email: body.email || null, address: body.address || null, licenceNo: body.licenceNo || null });
+    await audit(req, 'register_vehicle', 'vehicle', vehicle.id, { plate, vehicleClass: body.vehicleClass, owner: body.ownerName, photo: Boolean(body.ownerPhoto) });
     await ctx.refreshCounters();
     res.status(201).json(vehicle);
   });
@@ -271,7 +400,7 @@ export function createApp(ctx: AppContext) {
   });
 
   app.get('/api/emergency', async (req, res) => {
-    res.json({ active: sim.snapshot().emergencies, dispatches: await repo.listDispatches(40) });
+    res.json({ active: ctx.sim.snapshot().emergencies, dispatches: await repo.listDispatches(40) });
   });
 
   const dispatchSchema = z.object({ vehicleId: z.number().int().positive(), from: nodeIdSchema, to: nodeIdSchema });
@@ -303,9 +432,9 @@ export function createApp(ctx: AppContext) {
       label,
       originNode: body.from,
       destNode: body.to,
-      startedClock: sim.clock,
+      startedClock: ctx.sim.clock,
     });
-    const result = sim.dispatchEmergency({ plate: vehicle.plate, label, from: body.from, to: body.to, dispatchId: dispatch.id });
+    const result = ctx.sim.dispatchEmergency({ plate: vehicle.plate, label, from: body.from, to: body.to, dispatchId: dispatch.id });
     if (!result) {
       await repo.finishDispatch(dispatch.id, 'cancelled', null, 0);
       res.status(422).json({ error: 'No route available for this dispatch.' });
@@ -317,7 +446,21 @@ export function createApp(ctx: AppContext) {
   });
 
   app.get('/api/civic', async (req, res) => {
-    res.json(await repo.listCivic());
+    const staff = isStaff(roleOf(req));
+    res.json((await repo.listCivic()).map((r) => (staff ? r : { ...r, reporterPhone: null })));
+  });
+
+  app.get('/api/civic/:id/events', async (req, res) => {
+    res.json(await repo.listCivicEvents(idParam(req)));
+  });
+
+  app.get('/api/civic/:id/photo', async (req, res) => {
+    const kind = req.query.kind === 'resolution' ? 'resolution' : 'report';
+    sendDataUrl(res, await repo.civicPhoto(idParam(req), kind));
+  });
+
+  app.get('/api/civic-events/:id/photo', async (req, res) => {
+    sendDataUrl(res, await repo.civicEventPhoto(idParam(req)));
   });
 
   const civicSchema = z
@@ -328,66 +471,90 @@ export function createApp(ctx: AppContext) {
       nodeId: nodeIdSchema.nullable().optional(),
       severity: z.enum(['low', 'medium', 'high']),
       reporterName: z.string().trim().min(2).max(60),
+      reporterPhone: PHONE.optional().nullable().or(z.literal('')),
+      photo: PHOTO.optional().nullable(),
     })
     .refine((c) => c.linkId != null || c.nodeId != null, { message: 'Pick a road segment or junction on the map.' });
 
   app.post('/api/civic', async (req, res) => {
     const body = civicSchema.parse(req.body);
-    const report = await repo.createCivic({ ...body, linkId: body.linkId ?? null, nodeId: body.nodeId ?? null });
+    const report = await repo.createCivic({ ...body, linkId: body.linkId ?? null, nodeId: body.nodeId ?? null, reporterPhone: body.reporterPhone || null, photo: body.photo ?? null });
     const where = report.linkId !== null ? net.links[report.linkId].road : net.nodes[report.nodeId!].name;
-    sim.pushEvent('civic', 'Civic issue reported', `${report.category.replace('_', ' ')} on ${where}`, 'info');
-    await audit(req, 'create_civic', 'civic_report', report.id, { category: report.category });
+    ctx.sim.pushEvent('civic', 'Civic issue reported', `${report.category.replace('_', ' ')} on ${where}${report.hasPhoto ? ' (with photo)' : ''}`, 'info');
+    await audit(req, 'create_civic', 'civic_report', report.id, { category: report.category, reporter: body.reporterName, photo: report.hasPhoto });
     await ctx.refreshCounters();
     res.status(201).json(report);
   });
 
-  app.patch('/api/civic/:id', allow('controller', 'authority'), async (req, res) => {
+  const civicActionSchema = z
+    .object({
+      action: z.enum(CIVIC_ACTIONS).optional(),
+      status: z.enum(CIVIC_STATUSES).optional(),
+      note: z.string().trim().max(500).optional(),
+      assignee: z.string().trim().min(2).max(80).optional(),
+      photo: PHOTO.optional().nullable(),
+      rating: z.number().int().min(1).max(5).optional(),
+      actorName: z.string().trim().max(80).optional(),
+    })
+    .refine((b) => b.action || (b.status && STATUS_ACTION[b.status]), { message: 'Choose an action.' });
+
+  app.patch('/api/civic/:id', async (req, res) => {
     const id = idParam(req);
-    const { status } = z.object({ status: z.enum(CIVIC_STATUSES) }).parse(req.body);
+    const body = civicActionSchema.parse(req.body);
+    const action = (body.action ?? STATUS_ACTION[body.status!]) as CivicAction;
+    const role = roleOf(req);
+    if (STAFF_ACTIONS.includes(action) && !isStaff(role)) {
+      res.status(403).json({ error: 'Only the traffic authority or controller can do this.' });
+      return;
+    }
     const report = await repo.getCivic(id);
     if (!report) {
       res.status(404).json({ error: 'Report not found.' });
       return;
     }
+    if (!ACTION_FROM[action].includes(report.status)) {
+      res.status(409).json({ error: `A ${report.status.replace('_', ' ')} report cannot be moved with "${action}".` });
+      return;
+    }
+    if (action === 'assign' && !body.assignee) {
+      res.status(400).json({ error: 'Name the crew or officer to assign.' });
+      return;
+    }
+    if (action === 'reopen' && !body.note) {
+      res.status(400).json({ error: 'Say what is still wrong so the crew can fix it.' });
+      return;
+    }
+    const status = ACTION_STATUS[action];
     let impactApplied = report.impactApplied;
-    const active = (s: CivicStatus) => s === 'verified' || s === 'in_progress';
     const node = report.nodeId ?? (report.linkId !== null ? net.links[report.linkId].to : null);
-    if (active(status) && !impactApplied) {
-      if (report.category === 'broken_signal' && node !== null) {
-        sim.setSignalFault(node, true);
-        impactApplied = true;
-      } else if (report.linkId !== null) {
-        const impact = civicImpact(report.category, report.severity);
-        if (impact) {
-          const link = net.links[report.linkId];
-          const incidentId = sim.addIncident({
-            linkIds: impact.both ? [link.id, link.reverse] : [link.id],
-            source: 'civic',
-            durationS: null,
-            lanesLost: impact.lanesLost,
-            speedFactor: impact.speedFactor,
-            closes: impact.closes,
-            label: `${report.category.replace('_', ' ')} on ${link.road}`,
-          });
-          ctx.civicIncidents.set(report.id, incidentId);
-          impactApplied = true;
-        }
-      }
+    if (ACTIVE_CIVIC.includes(status) && !impactApplied) {
+      impactApplied = applyCivicImpact(ctx, report);
       if (impactApplied) {
-        sim.pushEvent('civic', 'Citizen report applied to traffic control', `Report #${report.id}: ${report.category.replace('_', ' ')} now affects routing and signals`, 'warning');
+        ctx.sim.pushEvent('civic', 'Citizen report applied to traffic control', `Report #${report.id}: ${report.category.replace('_', ' ')} now affects routing and signals`, 'warning');
       }
     }
-    if (!active(status) && impactApplied) {
+    if (!ACTIVE_CIVIC.includes(status) && impactApplied) {
       const incidentId = ctx.civicIncidents.get(report.id);
       if (incidentId) {
-        sim.clearIncident(incidentId);
+        ctx.sim.clearIncident(incidentId);
         ctx.civicIncidents.delete(report.id);
       }
-      if (report.category === 'broken_signal' && node !== null) sim.setSignalFault(node, false);
+      if (report.category === 'broken_signal' && node !== null) ctx.sim.setSignalFault(node, false);
       impactApplied = false;
     }
-    const updated = await repo.updateCivic(id, status, impactApplied);
-    await audit(req, 'update_civic', 'civic_report', id, { status });
+    const updated = await repo.updateCivic(id, {
+      status,
+      impactApplied,
+      assignedTo: action === 'assign' ? body.assignee! : undefined,
+      resolutionNote: action === 'resolve' ? (body.note ?? null) : undefined,
+      resolutionPhoto: action === 'resolve' ? (body.photo ?? null) : undefined,
+      rating: action === 'close' ? (body.rating ?? null) : undefined,
+      reopened: action === 'reopen',
+    });
+    const note = action === 'assign' ? `Assigned to ${body.assignee}${body.note ? `: ${body.note}` : ''}` : (body.note ?? (action === 'close' && body.rating ? `Rated ${body.rating}/5` : null));
+    await repo.addCivicEvent(id, status, role, body.actorName ?? null, note, body.photo ?? null);
+    if (action === 'resolve') ctx.sim.pushEvent('civic', 'Civic issue fixed', `Report #${report.id} on ${report.linkId !== null ? net.links[report.linkId].road : net.nodes[report.nodeId!].name} marked fixed`, 'info');
+    await audit(req, `civic_${action}`, 'civic_report', id, { status, assignee: body.assignee, rating: body.rating });
     await ctx.refreshCounters();
     res.json(updated);
   });
@@ -413,23 +580,79 @@ export function createApp(ctx: AppContext) {
     res.json(updated);
   });
 
-  const evacSchema = z.object({ center: nodeIdSchema, radius: z.number().int().min(1).max(2) });
+  const radii = cityConfig().evacuation.radiiKm;
+  const evacSchema = z.object({
+    center: nodeIdSchema,
+    radiusKm: z.number().refine((v) => radii.includes(v), { message: `Radius must be one of ${radii.join(', ')} km.` }),
+    kind: z.enum(['earthquake', 'flood', 'fire', 'other']).default('other'),
+  });
 
   app.post('/api/evacuation', allow('controller'), async (req, res) => {
     const body = evacSchema.parse(req.body);
-    const status = sim.activateEvacuation(body.center, body.radius);
+    const status = ctx.sim.activateEvacuation(body.center, body.radiusKm, body.kind);
     await audit(req, 'activate_evacuation', 'evacuation', body.center, body);
     res.status(201).json(status);
   });
 
   app.delete('/api/evacuation', allow('controller'), async (req, res) => {
-    sim.deactivateEvacuation();
+    ctx.sim.deactivateEvacuation();
     await audit(req, 'end_evacuation', 'evacuation', null);
     res.json({ ok: true });
   });
 
+  app.get('/api/replay', (req, res) => {
+    res.json(ctx.replay.status());
+  });
+
+  const datasetSchema = z.object({ name: z.string().trim().min(1).max(120), csv: z.string().min(10).max(6_000_000) });
+
+  app.post('/api/replay/dataset', allow('controller', 'authority'), async (req, res) => {
+    const body = datasetSchema.parse(req.body);
+    const wasActive = ctx.replay.running || ctx.sim.demandOverridden;
+    let summary;
+    try {
+      summary = ctx.replay.load(body.name, body.csv);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Could not read the file.' });
+      return;
+    }
+    if (wasActive) await ctx.stopReplay();
+    await audit(req, 'upload_dataset', 'dataset', null, { name: body.name, rows: summary.rows });
+    res.status(201).json(ctx.replay.status());
+  });
+
+  app.post('/api/replay/sample', allow('controller', 'authority'), async (req, res) => {
+    const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../ml/data/kaggle-traffic/TrafficTwoMonth.csv');
+    if (!existsSync(file)) {
+      res.status(404).json({ error: 'The Kaggle sample is not downloaded yet. Run npm run train:junction once, or upload the CSV yourself.' });
+      return;
+    }
+    const wasActive = ctx.replay.running || ctx.sim.demandOverridden;
+    ctx.replay.load('Kaggle Traffic Prediction Dataset (TrafficTwoMonth.csv)', readFileSync(file, 'utf8'));
+    if (wasActive) await ctx.stopReplay();
+    await audit(req, 'upload_dataset', 'dataset', null, { name: 'kaggle-sample' });
+    res.status(201).json(ctx.replay.status());
+  });
+
+  app.post('/api/replay/start', allow('controller', 'authority'), async (req, res) => {
+    const { speed } = z.object({ speed: z.union([z.literal(16), z.literal(32), z.literal(64), z.literal(128)]) }).parse(req.body);
+    if (!ctx.replay.rows.length) {
+      res.status(400).json({ error: 'Upload a dataset first.' });
+      return;
+    }
+    await ctx.startReplay(speed);
+    await audit(req, 'start_replay', 'dataset', null, { speed });
+    res.json(ctx.replay.status());
+  });
+
+  app.post('/api/replay/stop', allow('controller', 'authority'), async (req, res) => {
+    await ctx.stopReplay();
+    await audit(req, 'stop_replay', 'dataset', null);
+    res.json(ctx.replay.status());
+  });
+
   app.get('/api/analytics', (req, res) => {
-    res.json(sim.analytics());
+    res.json(ctx.sim.analytics());
   });
 
   app.get('/api/evaluation', (req, res) => {
@@ -450,6 +673,7 @@ export function createApp(ctx: AppContext) {
     runEvaluation(net, ctx.policy, ctx.forecaster, {
       seeds: 2,
       durationMin: 60,
+      junctionModel: ctx.junctionModel,
       onProgress: (done, total) => {
         e.done = done;
         e.total = total;
@@ -458,7 +682,7 @@ export function createApp(ctx: AppContext) {
       .then((result) => {
         e.result = result;
         saveJson('evaluation.json', result);
-        sim.pushEvent('system', 'Evaluation finished', 'Adaptive vs fixed-time comparison updated', 'info');
+        ctx.sim.pushEvent('system', 'Evaluation finished', 'Adaptive vs fixed-time comparison updated', 'info');
       })
       .catch((err) => console.error('Evaluation failed', err))
       .finally(() => {

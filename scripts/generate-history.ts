@@ -1,14 +1,16 @@
 import { createWriteStream, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { Simulation } from '../server/sim/engine';
-import { FEATURES } from '../server/sim/forecaster';
+import { FEATURES, TARGET_WINDOW_MIN } from '../server/sim/forecaster';
 import { loadPolicy } from '../server/sim/models';
 import { buildNetwork } from '../server/sim/network';
 import { mulberry32, pick, randInt } from '../server/sim/random';
 import type { Weather } from '../shared/types';
 
 const DAYS = Number(process.env.DAYS ?? 14);
-const SAMPLE_EVERY_MIN = 3;
+const SAMPLE_EVERY_MIN = 6;
+const KEEP_SHARE = 0.5;
+const LANE_EVERY = 10;
 const START_H = 4;
 const RECORD_FROM_H = 5;
 const END_H = 23.5;
@@ -16,6 +18,8 @@ const END_H = 23.5;
 const net = buildNetwork();
 const policy = loadPolicy();
 const rng = mulberry32(2026);
+const recorded = net.links.filter((l, i) => l.kind !== 'lane' || i % LANE_EVERY === 0).map((l) => l.id);
+console.log(`Recording ${recorded.length} of ${net.links.length} links (all main roads, every ${LANE_EVERY}th residential lane)`);
 const outDir = path.resolve('ml/data');
 mkdirSync(outDir, { recursive: true });
 const out = createWriteStream(path.join(outDir, 'link_history.csv'));
@@ -61,18 +65,22 @@ for (let day = 0; day < DAYS; day++) {
     scores.push(sim.linkScores());
     const idx = scores.length - 1;
     if (idx >= 15 && idx % SAMPLE_EVERY_MIN === 0) {
-      samples.push({ minute: idx, rows: net.links.map((l) => sim.linkFeatures(l.id)) });
+      const ids = recorded.filter(() => rng() < KEEP_SHARE);
+      samples.push({ minute: idx, rows: ids.map((id) => [id, ...sim.linkFeatures(id)]) });
     }
   }
   let rows = 0;
   for (const s of samples) {
     if (s.minute + 30 >= scores.length) continue;
-    const y15 = scores[s.minute + 15];
-    const y30 = scores[s.minute + 30];
+    const ahead = (link: number, horizon: number) => {
+      let sum = 0;
+      for (let k = horizon - TARGET_WINDOW_MIN + 1; k <= horizon; k++) sum += scores[s.minute + k][link];
+      return sum / TARGET_WINDOW_MIN;
+    };
     const lines: string[] = [];
-    s.rows.forEach((features, link) => {
-      lines.push([day, s.minute, link, ...features.map((v) => +v.toFixed(5)), y15[link].toFixed(5), y30[link].toFixed(5)].join(','));
-    });
+    for (const [link, ...features] of s.rows) {
+      lines.push([day, s.minute, link, ...features.map((v) => +v.toFixed(5)), ahead(link, 15).toFixed(5), ahead(link, 30).toFixed(5)].join(','));
+    }
     out.write(lines.join('\n') + '\n');
     rows += lines.length;
   }

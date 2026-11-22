@@ -1,11 +1,12 @@
 import clsx from 'clsx';
-import { Brain, CircleCheck, CircleX, CloudFog, CloudRain, CloudRainWind, Cpu, Database, Gauge, Pause, Play, ScrollText, Server, SlidersHorizontal, Sun } from 'lucide-react';
+import { Brain, Camera, CircleCheck, CircleX, CloudFog, CloudRain, CloudRainWind, CloudSun, Cpu, Database, Gauge, Map as MapIcon, Pause, Play, Radio, ScrollText, Server, SlidersHorizontal, Sun } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AuditEntry, Role, SimSettings, Weather } from '../../../shared/types';
 import { Badge, Button, Card, CardBody, CardHeader, EmptyState, PageHeader, Segmented, Skeleton, SkeletonGroup, TD, TH, Toggle, type Tone } from '../components/ui';
 import { api } from '../lib/api';
 import { timeAgo, titleCase } from '../lib/format';
 import { usePoll } from '../lib/hooks';
+import { timezoneAbbr, useLive } from '../lib/live';
 import { useRole } from '../lib/role';
 import { useToast } from '../lib/toast';
 
@@ -14,8 +15,64 @@ interface Health {
   database: 'postgres' | 'in-memory';
   forecaster: boolean;
   signalPolicy: boolean;
+  junctionModel?: boolean;
   simClock: string;
 }
+
+function LiveSources() {
+  const { live } = useLive();
+  if (!live) {
+    return (
+      <SkeletonGroup label="Loading live data sources…" className="divide-y divide-line">
+        {[...Array(3).keys()].map((i) => (
+          <div key={i} className="flex items-center gap-3 py-3">
+            <Skeleton className="size-9 rounded-xl" />
+            <div className="flex-1">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="mt-2 h-3 w-64" />
+            </div>
+          </div>
+        ))}
+      </SkeletonGroup>
+    );
+  }
+  const w = live.weather.reading;
+  const t = live.traffic;
+  const trafficDetail = !t.configured
+    ? 'No key configured. Add TOMTOM_API_KEY=your-key to .env and restart the server to use live road speeds and incidents; until then traffic is simulated.'
+    : t.status === 'ok'
+      ? `${t.samples.length} roads measured, ${t.incidents.length} live incidents. ${t.requestsToday} of ${t.dailyBudget} requests used today. Demand calibrated ×${t.calibration.toFixed(2)} to match measured speeds.`
+      : t.error ?? 'Connecting to TomTom…';
+  return (
+    <div className="divide-y divide-line">
+      <StatusLine
+        ok
+        icon={<MapIcon className="size-4" />}
+        label={`Road network · ${live.city.name}, ${live.city.region}`}
+        detail={`${live.network.nodes.toLocaleString('en-IN')} junctions and ${live.network.links.toLocaleString('en-IN')} links from ${live.network.source}, downloaded ${new Date(live.network.fetchedAt).toLocaleDateString('en-IN')} via ${live.network.via}. ${live.network.signalsOsm} signals mapped in OpenStreetMap, ${live.network.signalsInferred} inferred at major crossings.`}
+      />
+      <StatusLine
+        ok={Boolean(w) && !live.weather.error}
+        icon={<CloudSun className="size-4" />}
+        label={`Weather · ${live.weather.source}${live.weather.mode === 'manual' ? ' (overridden manually)' : ''}`}
+        detail={
+          w
+            ? `${w.description}, ${w.temperatureC.toFixed(1)}°C, ${w.precipitationMm} mm rain, visibility ${w.visibilityM !== null ? `${(w.visibilityM / 1000).toFixed(1)} km` : 'n/a'} → simulated as ${WEATHER_TEXT[w.condition]}. Observed ${w.observedAt.slice(11, 16)} ${timezoneAbbr(live.city.timezone)}.`
+            : live.weather.error ?? 'Waiting for the first reading…'
+        }
+      />
+      <StatusLine ok={t.status === 'ok'} icon={<Radio className="size-4" />} label={`Traffic · ${t.provider}`} detail={trafficDetail} />
+      <StatusLine
+        ok
+        icon={<Gauge className="size-4" />}
+        label={`Clock · ${live.clock.mode === 'live' ? `live ${timezoneAbbr(live.city.timezone)}` : 'fast-forward'}`}
+        detail={`Local time ${live.city.localDay} ${live.city.localTime}; the simulation shows ${live.clock.simDay} ${live.clock.simClock}.`}
+      />
+    </div>
+  );
+}
+
+const WEATHER_TEXT: Record<Weather, string> = { clear: 'clear', rain: 'rain', heavy_rain: 'heavy rain', fog: 'fog' };
 
 const ROLE_TONE: Record<Role, Tone> = {
   controller: 'navy',
@@ -168,6 +225,7 @@ export function SettingsPage() {
   const { data: settings, setData } = usePoll<SimSettings>('/settings', 5000);
   const { data: health } = usePoll<Health>('/health', 10000);
   const { data: audit } = usePoll<AuditEntry[]>('/audit', 8000);
+  const { refreshLive } = useLive();
 
   const patch = async (update: Partial<SimSettings>, success?: string) => {
     if (!settings) return;
@@ -176,6 +234,7 @@ export function SettingsPage() {
     try {
       const next = await api<SimSettings>('/settings', { method: 'PATCH', body: update });
       setData(next);
+      refreshLive();
       if (success) toast('success', success);
     } catch (e) {
       setData(previous);
@@ -203,18 +262,38 @@ export function SettingsPage() {
       />
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Card>
-          <CardHeader title="Simulation" subtitle="Clock speed, weather and demand of the live city model" icon={Gauge} />
+          <CardHeader title="Simulation" subtitle="Clock, weather and demand of the live city model" icon={Gauge} />
           <CardBody className="py-0">
             {settings ? (
               <div className="divide-y divide-line">
-                <SettingRow label="Simulation speed" description="Simulated seconds per real second.">
-                  <Segmented
-                    ariaLabel="Simulation speed"
-                    value={settings.speed}
-                    onChange={(speed) => patch({ speed })}
-                    options={SPEEDS.map((s) => ({ value: s as number, label: `${s}×` }))}
+                <div className="py-1">
+                  <Toggle
+                    checked={settings.liveClock}
+                    onChange={(liveClock) => patch({ liveClock }, liveClock ? 'Clock synced to live local time.' : 'Fast-forward mode: the clock no longer follows real time.')}
+                    disabled={!canEdit}
+                    label="Live clock"
+                    description="Run the city on real local time so demand, weather and live traffic line up. Turn off to fast-forward for demonstrations."
                   />
-                </SettingRow>
+                </div>
+                {!settings.liveClock && (
+                  <SettingRow label="Fast-forward speed" description="Simulated seconds per real second.">
+                    <Segmented
+                      ariaLabel="Simulation speed"
+                      value={settings.speed}
+                      onChange={(speed) => patch({ speed })}
+                      options={SPEEDS.map((s) => ({ value: s as number, label: `${s}×` }))}
+                    />
+                  </SettingRow>
+                )}
+                <div className="py-1">
+                  <Toggle
+                    checked={settings.liveWeather}
+                    onChange={(liveWeather) => patch({ liveWeather }, liveWeather ? 'Weather now follows Open-Meteo.' : 'Weather set manually.')}
+                    disabled={!canEdit}
+                    label="Live weather"
+                    description="Use current conditions from Open-Meteo. Choosing a weather below switches this off."
+                  />
+                </div>
                 <SettingRow label="Weather" description="Rain and fog lower speeds and saturation flow.">
                   <Segmented ariaLabel="Weather" value={settings.weather} onChange={(weather) => patch({ weather })} options={WEATHER_OPTIONS} size="sm" />
                 </SettingRow>
@@ -227,7 +306,7 @@ export function SettingsPage() {
                     onChange={(randomIncidents) => patch({ randomIncidents })}
                     disabled={!canEdit}
                     label="Random incidents"
-                    description="Occasional lane-blocking accidents appear on the network and clear after 15–40 minutes."
+                    description="Simulated lane-blocking accidents that clear after 15–40 minutes. Switched off automatically when live TomTom incidents are available."
                   />
                 </div>
               </div>
@@ -270,6 +349,13 @@ export function SettingsPage() {
           </CardBody>
         </Card>
 
+        <Card className="xl:col-span-2">
+          <CardHeader title="Live data sources" subtitle="Where every input comes from" icon={Radio} />
+          <CardBody className="py-1">
+            <LiveSources />
+          </CardBody>
+        </Card>
+
         <Card>
           <CardHeader title="System status" subtitle="Services behind the platform" icon={Server} />
           <CardBody className="py-1">
@@ -292,6 +378,12 @@ export function SettingsPage() {
                   icon={<Cpu className="size-4" />}
                   label="Signal control policy"
                   detail={health.signalPolicy ? 'Q-learning policy loaded' : 'Not trained — falling back to queue pressure control'}
+                />
+                <StatusLine
+                  ok={Boolean(health.junctionModel)}
+                  icon={<Camera className="size-4" />}
+                  label="Junction forecaster"
+                  detail={health.junctionModel ? 'XGBoost trained on the Kaggle Traffic Prediction Dataset (real camera counts)' : 'Not trained — run npm run train:junction'}
                 />
               </div>
             ) : (

@@ -268,12 +268,12 @@ function CameraCard({ network, alerts }: { network: NetworkInfo | null; alerts: 
       </SkeletonGroup>
     );
   }
-  const cameras = network.links.filter((l) => l.camera && l.id < l.reverse);
+  const cameras = network.links.filter((l) => l.camera && (l.reverse < 0 || l.id < l.reverse));
   const counts = new Map<number, number>();
   for (const a of alerts) {
     const link = network.links[a.linkId];
     if (!link) continue;
-    const seg = Math.min(link.id, link.reverse);
+    const seg = link.reverse >= 0 ? Math.min(link.id, link.reverse) : link.id;
     counts.set(seg, (counts.get(seg) ?? 0) + 1);
   }
   const markers: MapMarker[] = cameras.map((l) => ({ linkId: l.id, color: '#1f3d84', title: `Speed camera · ${l.road} (${l.speedLimit} km/h)` }));

@@ -9,7 +9,9 @@ import {
   type FeedEvent,
   type ForecastResponse,
   type Hotspot,
+  type DisasterKind,
   type Intervention,
+  type JunctionOutlook,
   type Kpis,
   type LinkForecast,
   type NetLink,
@@ -39,11 +41,13 @@ import {
   demandProfile,
   hourOfDay,
   isCargoRestricted,
-  isWeekend,
+  isOffDay,
   makePlate,
 } from './demand';
-import { FEATURES, type Forecaster } from './forecaster';
-import { hopDistances, type Network } from './network';
+import { cityConfig } from '../config';
+import { FEATURES, TARGET_WINDOW_MIN, tailMean, type Forecaster } from './forecaster';
+import type { JunctionForecaster } from './junction';
+import { distanceM, segmentKey, type Network } from './network';
 import { mulberry32, pick, pickWeighted, poisson, randInt, randRange, type Rng } from './random';
 import { ACTION_KEEP, ACTION_SWITCH, encodeState, type QPolicy } from './rl';
 import { routeNodes, shortestPath, type LinkTime, type RouteContext, type RouteOptions } from './routing';
@@ -61,7 +65,6 @@ const SCORE_ALPHA = 0.05;
 const SCORE_DENSITY = 0.3;
 const HISTORY_MINUTES = 31;
 const APPROACH_WINDOW = 120;
-const BASE_RATE = 4.6;
 
 const WEATHER_EFFECT: Record<Weather, { speed: number; sat: number; demand: number; code: number }> = {
   clear: { speed: 1, sat: 1, demand: 1, code: 0 },
@@ -70,9 +73,12 @@ const WEATHER_EFFECT: Record<Weather, { speed: number; sat: number; demand: numb
   fog: { speed: 0.75, sat: 0.88, demand: 0.97, code: 3 },
 };
 
-const KIND_CODE = { ring: 0, arterial: 1, street: 2, lane: 3 } as const;
+const KIND_CODE = { highway: 0, arterial: 1, street: 2, lane: 3 } as const;
+const UNCONTROLLED_FLOW = 0.75;
 
 export const DEFAULT_SETTINGS: SimSettings = {
+  liveClock: false,
+  liveWeather: false,
   speed: 4,
   paused: false,
   weather: 'clear',
@@ -113,7 +119,7 @@ interface Vehicle {
 interface Incident {
   id: string;
   linkIds: number[];
-  source: 'random' | 'civic';
+  source: 'random' | 'civic' | 'live';
   until: number | null;
   lanesLost: number;
   speedFactor: number;
@@ -152,6 +158,7 @@ interface LinkState {
 
 interface SignalRt {
   node: number;
+  controlled: boolean;
   phase: Phase;
   state: SignalState;
   timer: number;
@@ -179,9 +186,12 @@ interface Trip {
 
 interface Evacuation {
   center: number;
-  radius: number;
+  radiusKm: number;
+  kind: DisasterKind;
+  bridgesClosed: number[];
+  slow: Map<number, number>;
   zone: Set<number>;
-  hop: number[];
+  dist: number[];
   nearestExit: number[];
   closedLinks: number[];
   contraflowLinks: number[];
@@ -221,6 +231,7 @@ export interface EngineOptions {
   policy?: QPolicy | null;
   learning?: LearningConfig | null;
   forecaster?: Forecaster | null;
+  junctionModel?: JunctionForecaster | null;
   randomEmergencies?: boolean;
   overspeed?: boolean;
   baseRate?: number;
@@ -276,11 +287,17 @@ export class Simulation {
   private policy: QPolicy | null;
   private learning: LearningConfig | null;
   private forecaster: Forecaster | null;
+  private junctionModel: JunctionForecaster | null;
+  private approachBucket = new Map<number, { car: number; bike: number; heavy: number }>();
+  private approachHist = new Map<number, number[]>();
+  private outlooks: JunctionOutlook[] = [];
   private randomEmergencies: boolean;
   private overspeed: boolean;
   private baseRate: number;
   private keepSeries: boolean;
   private forecastT = -1;
+  private calibration = 1;
+  private demandOverride: { level: number; mix: { cls: VehicleClass[]; weights: number[] } } | null = null;
   private hotspots: Hotspot[] = [];
   private interventions: Intervention[] = [];
   private nextInterventionId = 1;
@@ -304,9 +321,10 @@ export class Simulation {
     this.policy = options.policy ?? null;
     this.learning = options.learning ?? null;
     this.forecaster = options.forecaster ?? null;
+    this.junctionModel = options.junctionModel ?? null;
     this.randomEmergencies = options.randomEmergencies ?? true;
     this.overspeed = options.overspeed ?? true;
-    this.baseRate = options.baseRate ?? BASE_RATE;
+    this.baseRate = options.baseRate ?? cityConfig().demand.baseTripsPerSecond;
     this.keepSeries = options.keepSeries ?? true;
     this.links = net.links.map((def) => ({
       def,
@@ -340,6 +358,7 @@ export class Simulation {
       const plan = this.defaultPlan(node.id);
       return {
         node: node.id,
+        controlled: node.signal !== null,
         phase: node.id % 2 === 0 ? 'NS' : 'EW',
         state: 'green',
         timer: 0,
@@ -415,7 +434,7 @@ export class Simulation {
       for (const l of this.net.inLinks[node]) {
         const def = this.net.links[l];
         if (def.phase !== phase) continue;
-        w = Math.max(w, def.kind === 'arterial' ? 3 : def.kind === 'ring' ? 2.5 : def.kind === 'street' ? 2 : 1);
+        w = Math.max(w, def.kind === 'arterial' || def.kind === 'highway' ? 3 : def.kind === 'street' ? 2 : 1);
       }
       return w;
     };
@@ -427,32 +446,17 @@ export class Simulation {
   }
 
   private buildOriginWeights(): Record<VehicleClass, number[]> {
-    const general = this.net.nodes.map((n) => {
-      const core = n.r >= 1 && n.r <= 3 && n.c >= 2 && n.c <= 4;
-      const ring = n.r === 0 || n.c === 0 || n.r === 4 || n.c === 6;
-      if (n.poi) return n.poi.kind === 'depot' ? 1.2 : 2.6;
-      if (core) return 3;
-      if (ring) return 1.5;
-      return 1.2;
-    });
-    const cargo = this.net.nodes.map((n) => {
-      if (n.poi?.kind === 'depot') return 9;
-      if (n.poi?.kind === 'market') return 2.5;
-      if (n.exit) return 3;
-      const ring = n.r === 0 || n.c === 0 || n.r === 4 || n.c === 6;
-      return ring ? 1.2 : 0.5;
-    });
-    this.homeWeights = this.net.nodes.map((n) => {
-      const core = n.r >= 1 && n.r <= 3 && n.c >= 2 && n.c <= 4;
-      if (core) return 0.4;
-      return n.r === 0 || n.c === 0 || n.r === 4 || n.c === 6 ? 2.2 : 1.6;
-    });
-    this.workWeights = this.net.nodes.map((n) => {
-      const core = n.r >= 1 && n.r <= 3 && n.c >= 2 && n.c <= 4;
-      if (n.poi && n.poi.kind !== 'depot') return 5;
-      return core ? 6 : 0.5;
-    });
-    return { private: general, two_wheeler: general, cargo, emergency: general };
+    const norm = (v: number[]) => {
+      const mean = v.reduce((a, b) => a + b, 0) / Math.max(1, v.length);
+      return v.map((x) => x / (mean || 1));
+    };
+    const { home, work, cargo } = this.net.weights;
+    this.homeWeights = norm(home);
+    this.workWeights = norm(work);
+    const general = this.homeWeights.map((h, i) => 0.5 * h + 0.5 * this.workWeights[i]);
+    const freight = norm(cargo);
+    const transit = norm(this.workWeights.map((w, i) => w + (this.net.nodes[i].poi?.kind === 'bus' || this.net.nodes[i].poi?.kind === 'station' ? 25 : 0)));
+    return { private: general, two_wheeler: general, cargo: freight, bus: transit, emergency: general };
   }
 
   private weather() {
@@ -509,7 +513,7 @@ export class Simulation {
   }
 
   private canEnter(L: LinkState, pcu: number): boolean {
-    if (L.occPcu + pcu > jamCapacity(L)) return false;
+    if (L.vehicles.length && L.occPcu + pcu > jamCapacity(L)) return false;
     const last = L.vehicles[L.vehicles.length - 1];
     if (last && last.pos < (JAM_SPACING * PCU[last.cls]) / Math.max(1, L.lanes)) return false;
     return true;
@@ -560,7 +564,7 @@ export class Simulation {
       stops: 0,
       drv: aggressive ? randRange(this.rng, 1.2, 1.45) : randRange(this.rng, 0.86, 1.02),
       weightT,
-      connected: this.rng() < 0.3,
+      connected: this.rng() < cityConfig().demand.connectedShare,
       evacuating: extra.evacuating ?? false,
       movedAt: this.t,
       cameraChecked: false,
@@ -575,7 +579,7 @@ export class Simulation {
   }
 
   private commuteWeights(): [number[], number[]] | null {
-    if (isWeekend(this.t) || this.rng() > 0.7) return null;
+    if (isOffDay(this.t) || this.rng() > 0.7) return null;
     const h = hourOfDay(this.t);
     if (h >= 6.5 && h < 11) return [this.homeWeights, this.workWeights];
     if (h >= 16 && h < 20.5) return [this.workWeights, this.homeWeights];
@@ -589,9 +593,7 @@ export class Simulation {
     for (let attempt = 0; attempt < 6; attempt++) {
       let origin = pickWeighted(this.rng, nodes, commute ? commute[0] : weights);
       let dest = pickWeighted(this.rng, nodes, commute ? commute[1] : weights);
-      const a = this.net.nodes[origin];
-      const b = this.net.nodes[dest];
-      if (Math.abs(a.r - b.r) + Math.abs(a.c - b.c) < 2) continue;
+      if (origin === dest || distanceM(this.net, origin, dest) < cityConfig().demand.minTripKm * 1000) continue;
       if (this.evac) {
         if (this.evac.zone.has(origin)) dest = this.evac.nearestExit[origin];
         else if (this.evac.zone.has(dest)) continue;
@@ -603,9 +605,10 @@ export class Simulation {
   }
 
   private spawnDemand(): void {
-    const rate = this.baseRate * demandProfile(this.t) * this.settings.demand * this.weather().demand;
+    const level = this.demandOverride ? this.demandOverride.level : demandProfile(this.t);
+    const rate = this.baseRate * level * this.settings.demand * this.weather().demand * (this.demandOverride ? 1 : this.calibration);
     const n = poisson(this.rng, rate);
-    const mix = classMix(this.t);
+    const mix = this.demandOverride?.mix ?? classMix(this.t);
     for (let i = 0; i < n; i++) {
       const cls = pickWeighted(this.rng, mix.cls, mix.weights);
       const od = this.sampleOd(cls);
@@ -626,16 +629,16 @@ export class Simulation {
   }
 
   private spawnRandomEmergency(): void {
-    const stations = this.net.nodes.filter((n) => n.poi && ['hospital', 'fire', 'police'].includes(n.poi.kind));
-    const station = pick(this.rng, stations);
-    const hop = hopDistances(this.net, station.id);
-    const targets = this.net.nodes.filter((n) => hop[n.id] >= 3);
+    if (!this.net.stations.length) return;
+    const station = this.net.nodes[pick(this.rng, this.net.stations)];
+    const targets = this.net.nodes.filter((n) => distanceM(this.net, station.id, n.id) >= 1500);
+    if (!targets.length) return;
     const target = pick(this.rng, targets);
-    const kind = station.poi!.kind;
-    const label = kind === 'hospital' ? 'Ambulance' : kind === 'fire' ? 'Fire tender' : 'Police patrol';
+    const kind = station.poi?.kind ?? 'hospital';
+    const label = kind === 'fire' ? 'Fire tender' : kind === 'police' ? 'Police patrol' : 'Ambulance';
     const v = this.spawn('emergency', station.id, target.id, { label, plate: makePlate(this.rng, 'emergency') });
     if (v) {
-      this.emit('ambulance', `${label} dispatched`, `${v.plate} from ${station.poi!.name} to ${target.name}`, 'info');
+      this.emit('ambulance', `${label} dispatched`, `${v.plate} from ${station.poi?.name ?? station.name} to ${target.poi?.name ?? target.name}`, 'info');
     }
   }
 
@@ -657,6 +660,7 @@ export class Simulation {
         if (!this.settings.emergencyPriority || eta > 35) continue;
         const def = this.net.links[lid];
         const sig = this.signals[def.to];
+        if (!sig.controlled) continue;
         if (!sig.preempt || sig.preempt.vehicleId === v.id) {
           sig.preempt = { phase: def.phase, until: this.t + Math.ceil(eta) + 6, vehicleId: v.id };
           if (!v.preemptedNodes!.has(def.to)) v.preemptedNodes!.add(def.to);
@@ -702,6 +706,7 @@ export class Simulation {
   }
 
   private stepSignal(sig: SignalRt): void {
+    if (!sig.controlled) return;
     sig.timer++;
     if (sig.state === 'yellow') {
       if (sig.timer >= YELLOW) {
@@ -838,8 +843,9 @@ export class Simulation {
       }
       const len = L.def.length;
       const sig = this.signals[L.def.to];
-      const green = sig.state === 'green' && sig.phase === L.def.phase;
-      L.discharge = green ? Math.min(L.discharge + SAT_FLOW * L.lanes * w.sat, L.lanes * 0.5 + 2.5) : 0;
+      const green = !sig.controlled || (sig.state === 'green' && sig.phase === L.def.phase);
+      const flow = SAT_FLOW * L.lanes * w.sat * (sig.controlled ? 1 : UNCONTROLLED_FLOW);
+      L.discharge = green ? Math.min(L.discharge + flow, L.lanes * 0.5 + 2.5) : 0;
       const vFree = this.freeSpeed(L);
       const flowFactor = Math.max(0.12, 1 - L.occPcu / jamCapacity(L));
       const spacingUnit = JAM_SPACING / Math.max(1, L.lanes);
@@ -871,7 +877,7 @@ export class Simulation {
             const node = L.def.to;
             let nextLid = v.route[v.step + 1];
             let next = this.links[nextLid];
-            if ((next.closed && !isEmergency) || (v.connected && !isEmergency)) {
+            if ((next.closed && !isEmergency) || (v.connected && !isEmergency && sig.controlled)) {
               const fresh = this.nextRoute(v, node);
               if (fresh === null) {
                 if (next.closed) {
@@ -886,6 +892,7 @@ export class Simulation {
             }
             if ((isEmergency || !next.closed) && (isEmergency || this.canEnter(next, pcu))) {
               L.discharge -= pcu;
+              if (sig.controlled) this.countApproach(L.def.id, v.cls);
               v.step++;
               v.queued = false;
               v.speed = desired;
@@ -949,6 +956,7 @@ export class Simulation {
     this.stats.ticks++;
     if (this.learning) {
       for (const sig of this.signals) {
+        if (!sig.controlled) continue;
         let local = 0;
         let down = 0;
         for (const lid of this.net.inLinks[sig.node]) local += this.links[lid].queue;
@@ -973,9 +981,11 @@ export class Simulation {
     L.contraflow = false;
     L.evacBias = 1;
     if (this.evac) {
-      if (this.evac.closedLinks.includes(lid)) closed = true;
+      if (this.evac.closedLinks.includes(lid) || this.evac.bridgesClosed.includes(lid)) closed = true;
+      const slow = this.evac.slow.get(lid);
+      if (slow !== undefined) speedFactor = Math.min(speedFactor, slow);
       if (this.evac.contraflowLinks.includes(lid)) {
-        lanes += this.net.links[L.def.reverse].lanes;
+        if (L.def.reverse >= 0) lanes += this.net.links[L.def.reverse].lanes;
         L.contraflow = true;
         L.evacBias = 2;
       }
@@ -991,7 +1001,7 @@ export class Simulation {
 
   addIncident(spec: {
     linkIds: number[];
-    source: 'random' | 'civic';
+    source: 'random' | 'civic' | 'live';
     durationS: number | null;
     lanesLost: number;
     speedFactor: number;
@@ -1039,7 +1049,7 @@ export class Simulation {
     const L = pickWeighted(
       this.rng,
       candidates,
-      candidates.map((c) => (c.def.kind === 'arterial' ? 3 : c.def.kind === 'ring' ? 1.5 : 2)),
+      candidates.map((c) => (c.def.kind === 'arterial' ? 3 : c.def.kind === 'highway' ? 1.5 : 2)),
     );
     const label = `${L.def.road} ${DIR_LABEL[L.def.dir]} near ${this.net.nodes[L.def.to].name}`;
     this.addIncident({
@@ -1134,6 +1144,7 @@ export class Simulation {
     }
     const values: Record<(typeof FEATURES)[number], number> = {
       score: L.score,
+      score_mean5: tailMean(h, TARGET_WINDOW_MIN, L.score),
       score_lag5: lag(5),
       score_lag10: lag(10),
       score_lag15: lag(15),
@@ -1144,7 +1155,7 @@ export class Simulation {
       downstream: meanScore(this.net.outLinks[L.def.to]),
       tod_sin: Math.sin(tod),
       tod_cos: Math.cos(tod),
-      weekend: isWeekend(this.t) ? 1 : 0,
+      weekend: isOffDay(this.t) ? 1 : 0,
       weather: this.weather().code,
       incident: L.incidents.size || L.closed ? 1 : 0,
       incident_near: incidentNear,
@@ -1176,7 +1187,7 @@ export class Simulation {
       L.conf30 = fc.confidence(30, L.fc30) * (this.settings.weather === 'clear' ? 1 : 0.95);
       p15[i] = L.fc15;
       p30[i] = L.fc30;
-      base[i] = L.score;
+      base[i] = tailMean(L.hist, TARGET_WINDOW_MIN, L.score);
     }
     this.forecastT = this.t;
     const minute = Math.floor(this.t / 60);
@@ -1188,7 +1199,7 @@ export class Simulation {
       let baseErr = 0;
       let hit = 0;
       for (let i = 0; i < n; i++) {
-        const actual = this.links[i].score;
+        const actual = base[i];
         const pred = h === 15 ? past.p15[i] : past.p30[i];
         err += Math.abs(pred - actual);
         baseErr += Math.abs(past.base[i] - actual);
@@ -1214,6 +1225,109 @@ export class Simulation {
         level: congestionLevel(Math.max(L.fc15, L.fc30)),
       }));
     if (minute % 5 === 0 && this.settings.adaptive) this.planInterventions();
+  }
+
+  private countApproach(linkId: number, cls: VehicleClass): void {
+    let b = this.approachBucket.get(linkId);
+    if (!b) {
+      b = { car: 0, bike: 0, heavy: 0 };
+      this.approachBucket.set(linkId, b);
+    }
+    if (cls === 'two_wheeler') b.bike++;
+    else if (cls === 'cargo' || cls === 'bus') b.heavy++;
+    else b.car++;
+  }
+
+  private junctionTick(): void {
+    const buckets = this.approachBucket;
+    this.approachBucket = new Map();
+    for (const sig of this.signals) {
+      if (!sig.controlled) continue;
+      for (const lid of this.net.inLinks[sig.node]) {
+        const b = buckets.get(lid);
+        const hist = this.approachHist.get(lid) ?? [];
+        hist.push(b ? b.car + b.bike + b.heavy : 0);
+        if (hist.length > 5) hist.shift();
+        this.approachHist.set(lid, hist);
+      }
+    }
+    const model = this.junctionModel;
+    if (!model) return;
+    const startT = this.t - 900;
+    const angle = (((startT % DAY_SECONDS) / 60) / 1440) * Math.PI * 2;
+    const round2 = (v: number) => Math.round(v * 100) / 100;
+    const outlooks: JunctionOutlook[] = [];
+    for (const sig of this.signals) {
+      if (!sig.controlled) continue;
+      let best = -1;
+      let bestTotal = -1;
+      for (const lid of this.net.inLinks[sig.node]) {
+        const hist = this.approachHist.get(lid);
+        const total = hist ? hist[hist.length - 1] : 0;
+        if (total > bestTotal) {
+          bestTotal = total;
+          best = lid;
+        }
+      }
+      if (best < 0) continue;
+      const hist = this.approachHist.get(best)!;
+      const b = buckets.get(best) ?? { car: 0, bike: 0, heavy: 0 };
+      const total = hist[hist.length - 1];
+      const lag = (k: number) => (hist.length - 1 - k >= 0 ? hist[hist.length - 1 - k] : total);
+      const last4 = [total, lag(1), lag(2), lag(3)];
+      const mean4 = last4.reduce((a, v) => a + v, 0) / 4;
+      const std4 = Math.sqrt(last4.reduce((a, v) => a + (v - mean4) ** 2, 0) / 3);
+      const x = [
+        b.car,
+        b.bike,
+        b.heavy,
+        total,
+        lag(1),
+        lag(2),
+        lag(3),
+        lag(4),
+        mean4,
+        std4,
+        total - lag(1),
+        total ? b.heavy / total : 0,
+        total ? b.bike / total : 0,
+        Math.sin(angle),
+        Math.cos(angle),
+        dayIndex(startT),
+        isOffDay(startT) ? 1 : 0,
+      ];
+      const now = model.situation(0, x);
+      const s15 = model.situation(15, x);
+      const s30 = model.situation(30, x);
+      const node = this.net.nodes[sig.node];
+      const L = this.links[best];
+      outlooks.push({
+        nodeId: sig.node,
+        name: node.name,
+        approachLinkId: best,
+        approachRoad: L.def.road,
+        clock: this.clock,
+        counts: { car: b.car, bike: b.bike, heavy: b.heavy, total },
+        situationNow: now.label,
+        situation15: s15.label,
+        situation30: s30.label,
+        probs15: s15.probs.map(round2),
+        probs30: s30.probs.map(round2),
+        count15: Math.round(model.count(15, x)),
+        count30: Math.round(model.count(30, x)),
+      });
+      if (this.settings.adaptive && s15.label === 'heavy' && now.label !== 'heavy' && s15.probs[3] >= 0.5 && L.bias === 1) {
+        L.bias = 1.35;
+        L.biasUntil = this.t + 900;
+        const text = `Junction model (trained on real camera counts) predicts heavy traffic at ${node.name} in 15 min (${Math.round(
+          s15.probs[3] * 100,
+        )}% probability). Green priority raised for the ${L.def.road} approach.`;
+        this.interventions.unshift({ id: this.nextInterventionId++, t: this.t, clock: this.clock, kind: 'signal_bias', linkId: best, nodeId: sig.node, text });
+        this.emit('forecast', `Heavy traffic expected: ${node.name}`, text, 'warning');
+        if (this.interventions.length > 30) this.interventions.length = 30;
+      }
+    }
+    this.outlooks = outlooks;
   }
 
   private planInterventions(): void {
@@ -1253,6 +1367,7 @@ export class Simulation {
     this.updateIncidents();
     if (this.t % 10 === 0) this.refreshCosts();
     if (this.t % 60 === 0) this.minuteTick();
+    if (this.t % 900 === 0) this.junctionTick();
   }
 
   run(seconds: number): void {
@@ -1268,9 +1383,9 @@ export class Simulation {
     const seen = new Set<number>();
     let congested = 0;
     for (const L of this.links) {
-      const seg = Math.min(L.def.id, L.def.reverse);
+      const seg = segmentKey(this.net, L.def.id);
       if (seen.has(seg)) continue;
-      const rev = this.links[L.def.reverse];
+      const rev = L.def.reverse >= 0 ? this.links[L.def.reverse] : L;
       if (Math.max(L.score, rev.score) >= 0.6) {
         congested++;
         seen.add(seg);
@@ -1325,7 +1440,10 @@ export class Simulation {
     }
     return {
       center: e.center,
-      radius: e.radius,
+      radiusKm: e.radiusKm,
+      kind: e.kind,
+      bridgesClosed: e.bridgesClosed,
+      slowedLinks: e.slow.size,
       zoneNodes: [...e.zone],
       closedLinks: e.closedLinks,
       contraflowLinks: e.contraflowLinks,
@@ -1356,6 +1474,7 @@ export class Simulation {
       speed: this.settings.speed,
       paused: this.settings.paused,
       adaptive: this.settings.adaptive,
+      liveClock: this.settings.liveClock,
       kpis: this.kpis(),
       linkScore: this.links.map((L) => round(L.score, 2)),
       linkQueue: this.links.map((L) => L.queue),
@@ -1368,7 +1487,7 @@ export class Simulation {
         return f;
       }),
       vehicles,
-      signals: this.signals.map((s) => {
+      signals: this.signals.filter((s) => s.controlled).map((s) => {
         let f = 0;
         if (s.mode === 'adaptive' && this.settings.adaptive) f |= SIGNAL_FLAG.adaptive;
         if (s.preempt) f |= SIGNAL_FLAG.preempted;
@@ -1382,7 +1501,7 @@ export class Simulation {
   }
 
   signalDetails(): SignalDetail[] {
-    return this.signals.map((s) => {
+    return this.signals.filter((s) => s.controlled).map((s) => {
       let queueNS = 0;
       let queueEW = 0;
       for (const lid of this.net.inLinks[s.node]) {
@@ -1422,15 +1541,34 @@ export class Simulation {
       };
     }
     sig.lastAction = 'Plan updated by controller';
-    return this.signalDetails()[node];
+    return this.signalDetails().find((d) => d.nodeId === node)!;
   }
 
   planRoute(from: number, to: number, cls: VehicleClass, weightT?: number): RoutePlan {
     const priority = cls === 'emergency' && this.settings.emergencyPriority;
     const weight = weightT ?? (cls === 'cargo' ? 18 : 1.5);
     const ctx = this.routeContext();
-    const res = shortestPath(ctx, from, to, { cls, weightT: weight, priority });
+    let res = shortestPath(ctx, from, to, { cls, weightT: weight, priority });
     const notes: string[] = [];
+    if (!res && cls === 'cargo') {
+      const nearby = this.net.nodes
+        .filter((n) => n.id !== to && n.id !== from)
+        .map((n) => ({ id: n.id, d: distanceM(this.net, to, n.id) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 60);
+      for (const c of nearby) {
+        const alt = shortestPath(ctx, from, c.id, { cls, weightT: weight, priority });
+        if (alt) {
+          res = alt;
+          const target = this.net.nodes[to];
+          const drop = this.net.nodes[c.id];
+          notes.push(
+            `${target.poi?.name ?? target.name} is only reachable by residential lanes or weight-limited roads, so the truck (${weight} t) stops at ${drop.poi?.name ?? drop.name}, ${Math.round(c.d)} m away, for the last stretch.`,
+          );
+          break;
+        }
+      }
+    }
     if (!res) {
       if (cls === 'cargo' && ctx.cargoRestricted) notes.push('Commuter core is closed to freight during peak hours.');
       return {
@@ -1448,7 +1586,7 @@ export class Simulation {
     let distance = 0;
     let eta = 0;
     let offset = 0;
-    let ringM = 0;
+    let highwayM = 0;
     let laneM = 0;
     let incidents = 0;
     for (const lid of res.links) {
@@ -1460,18 +1598,19 @@ export class Simulation {
       eta += seconds;
       offset += seconds;
       distance += def.length;
-      if (def.kind === 'ring') ringM += def.length;
+      if (def.kind === 'highway') highwayM += def.length;
       if (def.kind === 'lane') laneM += def.length;
       if (this.links[lid].incidents.size) incidents++;
     }
-    const signals = Math.max(0, res.links.length - 1);
+    const signals = res.links.slice(0, -1).filter((lid) => this.signals[this.net.links[lid].to].controlled).length;
     if (cls === 'cargo') {
       if (ctx.cargoRestricted) notes.push('Peak-hour freight restriction: avoids the commuter core (08–11, 17–20).');
-      if (ringM > 0) notes.push(`Uses the Ring Road freight corridor for ${(ringM / 1000).toFixed(1)} km.`);
-      notes.push(`Skips narrow lanes and links under its ${weight} t weight.`);
+      if (highwayM > 0) notes.push(`Uses the highway freight corridor for ${(highwayM / 1000).toFixed(1)} km.`);
+      notes.push(`Skips residential lanes and links under its ${weight} t weight.`);
+      notes.push('Queues weigh 1.8× for heavy vehicles, so the truck takes the least congested path and does not add to jams.');
     }
     if (cls === 'two_wheeler') {
-      if (laneM > 0) notes.push(`Cuts through old-town lanes (${(laneM / 1000).toFixed(1)} km).`);
+      if (laneM > 0) notes.push(`Cuts through residential lanes (${(laneM / 1000).toFixed(1)} km).`);
       notes.push('Lane filtering shortens waits at signals.');
     }
     if (cls === 'emergency') {
@@ -1481,7 +1620,11 @@ export class Simulation {
           : 'Signal priority is switched off; route uses normal signal timing.',
       );
     }
-    if (cls === 'private' && laneM === 0) notes.push('Sticks to arterials and streets; avoids narrow lanes.');
+    if (cls === 'private' && laneM === 0) notes.push('Sticks to main roads and streets; avoids residential lanes.');
+    if (cls === 'bus') {
+      notes.push('Public transport corridor: keeps to main roads, where stops are easy to reach.');
+      if (laneM > 0) notes.push(`Uses ${(laneM / 1000).toFixed(1)} km of residential lane only where the stop cannot be reached otherwise.`);
+    }
     if (incidents) notes.push(`Passes ${incidents} segment(s) with an active incident.`);
     if (this.settings.forecastRouting && this.forecastT >= 0) notes.push('Costs include the 15–30 min congestion forecast.');
     return {
@@ -1531,35 +1674,51 @@ export class Simulation {
     return { vehicleId: v.id, plan, estNoPriorityS: Math.round(noPriority) };
   }
 
-  activateEvacuation(center: number, radius: number): EvacuationStatus {
+  activateEvacuation(center: number, radiusKm: number, kind: DisasterKind = 'other'): EvacuationStatus {
     if (this.evac) this.deactivateEvacuation(false);
-    const hop = hopDistances(this.net, center);
-    const zone = new Set(this.net.nodes.filter((n) => hop[n.id] <= radius).map((n) => n.id));
+    const dist = this.net.nodes.map((n) => distanceM(this.net, center, n.id));
+    const zone = new Set(this.net.nodes.filter((n) => dist[n.id] <= radiusKm * 1000).map((n) => n.id));
     let exits = this.net.exits.filter((id) => !zone.has(id));
-    if (!exits.length) exits = this.net.nodes.filter((n) => !zone.has(n.id) && (n.r === 0 || n.r === 4)).map((n) => n.id);
-    const exitHops = exits.map((e) => hopDistances(this.net, e));
+    if (!exits.length) exits = [...this.net.nodes].sort((a, b) => dist[b.id] - dist[a.id]).slice(0, 4).map((n) => n.id);
     const nearestExit = this.net.nodes.map((n) => {
       let best = exits[0];
-      let bestHop = Infinity;
-      exits.forEach((e, i) => {
-        if (exitHops[i][n.id] < bestHop) {
-          bestHop = exitHops[i][n.id];
+      let bestD = Infinity;
+      for (const e of exits) {
+        const d = distanceM(this.net, n.id, e);
+        if (d < bestD) {
+          bestD = d;
           best = e;
         }
-      });
+      }
       return best;
     });
     const closedLinks: number[] = [];
     const contraflowLinks: number[] = [];
     for (const def of this.net.links) {
-      if (zone.has(def.to) && hop[def.to] < hop[def.from]) closedLinks.push(def.id);
-      else if (zone.has(def.from) && hop[def.to] > hop[def.from]) contraflowLinks.push(def.id);
+      if (zone.has(def.to) && dist[def.to] < dist[def.from]) closedLinks.push(def.id);
+      else if (zone.has(def.from) && dist[def.to] > dist[def.from]) contraflowLinks.push(def.id);
+    }
+    const near = (id: number, extraKm: number) => dist[id] <= (radiusKm + extraKm) * 1000;
+    const bridgesClosed =
+      kind === 'earthquake' || kind === 'flood'
+        ? this.net.links.filter((l) => l.bridge && (near(l.from, kind === 'earthquake' ? 0.5 : 0) || near(l.to, kind === 'earthquake' ? 0.5 : 0))).map((l) => l.id)
+        : [];
+    const slow = new Map<number, number>();
+    for (const l of this.net.links) {
+      const inside = zone.has(l.from) || zone.has(l.to);
+      if (!inside) continue;
+      if (kind === 'earthquake' && l.kind === 'lane') slow.set(l.id, 0.45);
+      if (kind === 'flood') slow.set(l.id, l.kind === 'lane' ? 0.35 : 0.6);
+      if (kind === 'fire' && l.kind === 'lane') slow.set(l.id, 0.7);
     }
     this.evac = {
       center,
-      radius,
+      radiusKm,
+      kind,
+      bridgesClosed,
+      slow,
       zone,
-      hop,
+      dist,
       nearestExit,
       closedLinks,
       contraflowLinks,
@@ -1570,7 +1729,7 @@ export class Simulation {
       exitedThisMinute: 0,
     };
     for (const def of this.net.links) this.recomputeLink(def.id);
-    for (const sig of this.signals) sig.evacuation = zone.has(sig.node);
+    for (const sig of this.signals) sig.evacuation = sig.controlled && zone.has(sig.node);
     for (const v of this.vehicles.values()) {
       if (v.cls === 'emergency') continue;
       const def = this.net.links[v.link];
@@ -1586,8 +1745,10 @@ export class Simulation {
       if (fresh) v.route = [...v.route.slice(0, v.step + 1), ...fresh];
       else v.route = v.route.slice(0, v.step + 1);
     }
-    const name = this.net.nodes[center].name;
-    this.emit('evacuation', 'Evacuation mode activated', `Zone around ${name} (radius ${radius}); ${contraflowLinks.length} exit corridors opened`, 'critical');
+    const node = this.net.nodes[center];
+    const label = { earthquake: 'Earthquake', flood: 'Flood', fire: 'Fire / chemical leak', other: 'Emergency' }[kind];
+    const extra = bridgesClosed.length ? `, ${bridgesClosed.length} bridge links closed for safety` : '';
+    this.emit('evacuation', `${label} evacuation activated`, `${radiusKm} km around ${node.poi?.name ?? node.name}; ${contraflowLinks.length} exit corridors opened${extra}`, 'critical');
     return this.evacuationStatus()!;
   }
 
@@ -1623,6 +1784,22 @@ export class Simulation {
       links: this.forecastT >= 0 ? links : [],
       hotspots: this.hotspots,
       interventions: this.interventions,
+      junctionModel: this.junctionModel
+        ? {
+            available: true,
+            name: this.junctionModel.file.name,
+            dataset: {
+              name: this.junctionModel.file.dataset.name,
+              url: this.junctionModel.file.dataset.url,
+              rows: this.junctionModel.file.dataset.rows,
+              days: this.junctionModel.file.dataset.days,
+              intervalMin: this.junctionModel.file.dataset.intervalMin,
+            },
+            trainedAt: this.junctionModel.file.trainedAt,
+            metrics: this.junctionModel.file.metrics,
+          }
+        : { available: false, name: 'Not trained', dataset: null, trainedAt: null, metrics: null },
+      junctions: this.outlooks,
     };
   }
 
@@ -1654,10 +1831,10 @@ export class Simulation {
   }
 
   analytics(): AnalyticsLive {
-    const classMixCount: Record<VehicleClass, number> = { private: 0, two_wheeler: 0, cargo: 0, emergency: 0 };
+    const classMixCount: Record<VehicleClass, number> = { private: 0, two_wheeler: 0, cargo: 0, bus: 0, emergency: 0 };
     for (const v of this.vehicles.values()) classMixCount[v.cls]++;
     const tripsByClass = {} as AnalyticsLive['tripsByClass'];
-    for (const cls of ['private', 'two_wheeler', 'cargo', 'emergency'] as VehicleClass[]) {
+    for (const cls of ['private', 'two_wheeler', 'cargo', 'bus', 'emergency'] as VehicleClass[]) {
       const rows = this.trips.filter((t) => t.cls === cls);
       tripsByClass[cls] = {
         trips: rows.length,
@@ -1676,6 +1853,32 @@ export class Simulation {
         avgSavedMin: ds.savedN ? round(ds.savedSum / ds.savedN / 60, 1) : null,
       },
     };
+  }
+
+  setDemandOverride(override: { level: number; mix: { cls: VehicleClass[]; weights: number[] } } | null): void {
+    this.demandOverride = override;
+  }
+
+  get demandOverridden(): boolean {
+    return this.demandOverride !== null;
+  }
+
+  setCalibration(factor: number): void {
+    this.calibration = Math.min(3, Math.max(0.3, factor));
+  }
+
+  get demandCalibration(): number {
+    return this.calibration;
+  }
+
+  linkScore(linkId: number): number {
+    return this.links[linkId].score;
+  }
+
+  forecastMadeAt(minute: number, linkId: number, horizon: 15 | 30): number | null {
+    const entry = this.predLog.get(minute);
+    if (!entry) return null;
+    return horizon === 15 ? entry.p15[linkId] : entry.p30[linkId];
   }
 
   setWeather(weather: Weather): void {

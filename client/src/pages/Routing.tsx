@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { Ambulance, Bike, Car, Clock, Layers, MapPin, Navigation, Route, Signpost, Timer, TrafficCone, Truck, Weight, type LucideIcon } from 'lucide-react';
+import { Ambulance, Bike, BusFront, Car, Clock, Layers, MapPin, Navigation, Route, Signpost, Timer, TrafficCone, Truck, Weight, type LucideIcon } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   CLASS_LABEL,
@@ -19,7 +19,7 @@ import { usePoll } from '../lib/hooks';
 import { useLive } from '../lib/live';
 import { CLASS_COLOR, num } from '../lib/format';
 
-const CLASS_ICON: Record<VehicleClass, LucideIcon> = { private: Car, two_wheeler: Bike, cargo: Truck, emergency: Ambulance };
+const CLASS_ICON: Record<VehicleClass, LucideIcon> = { private: Car, two_wheeler: Bike, cargo: Truck, bus: BusFront, emergency: Ambulance };
 
 type Mode = 'all' | VehicleClass;
 
@@ -37,30 +37,39 @@ const MODE_OPTIONS: { value: Mode; label: string }[] = [
   { value: 'private', label: 'Private car' },
   { value: 'two_wheeler', label: 'Two-wheeler' },
   { value: 'cargo', label: 'Cargo' },
+  { value: 'bus', label: 'Bus' },
   { value: 'emergency', label: 'Emergency' },
 ];
 
 const KIND_INFO: Record<LinkKind, { label: string; note: string; color: string }> = {
-  ring: { label: 'Ring Road', note: 'Freight corridor around the city', color: '#1f3d84' },
-  arterial: { label: 'Arterial', note: 'MG Road and Clock Tower Road', color: '#2563eb' },
+  highway: { label: 'Highway', note: 'National and state highways; the freight corridor', color: '#1f3d84' },
+  arterial: { label: 'Main road', note: 'District and main town roads', color: '#2563eb' },
   street: { label: 'Street', note: 'Local streets between junctions', color: '#8a98b1' },
-  lane: { label: 'Narrow lane', note: 'Old-town lanes, closed to cargo', color: '#b45309' },
+  lane: { label: 'Residential lane', note: 'Narrow lanes, closed to cargo', color: '#b45309' },
 };
 
-function cargoRestriction(snap: Snapshot | null) {
+const hhmm = (h: number) => `${String(h).padStart(2, '0')}:00`;
+
+function cargoRestriction(snap: Snapshot | null, network: NetworkInfo) {
   if (!snap) return null;
+  const { weeklyOff, freightBanHours } = network.meta.rules;
   const [hh, mm] = snap.clock.split(':').map(Number);
   const h = hh + mm / 60;
-  const weekday = snap.day !== 'Saturday' && snap.day !== 'Sunday';
-  const morning = h >= 8 && h < 11;
-  const evening = h >= 17 && h < 20;
-  const active = weekday && (morning || evening);
+  const workday = !weeklyOff.includes(snap.day);
+  const window = freightBanHours.find(([a, b]) => h >= a && h < b);
+  const active = workday && Boolean(window);
+  const upcoming = freightBanHours.find(([a]) => a > h);
   let next: string;
-  if (active) next = morning ? 'Lifts at 11:00' : 'Lifts at 20:00';
-  else if (weekday && h < 8) next = 'Starts at 08:00';
-  else if (weekday && h >= 11 && h < 17) next = 'Starts at 17:00';
-  else next = 'Next window 08:00 on the next weekday';
-  return { active, next, weekday };
+  if (active && window) next = `Lifts at ${hhmm(window[1])}`;
+  else if (workday && upcoming) next = `Starts at ${hhmm(upcoming[0])}`;
+  else next = `Next window ${hhmm(freightBanHours[0]?.[0] ?? 0)} on the next working day`;
+  return { active, next, workday };
+}
+
+function restrictionText(network: NetworkInfo): string {
+  const { weeklyOff, freightBanHours } = network.meta.rules;
+  const windows = freightBanHours.map(([a, b]) => `${hhmm(a)}–${hhmm(b)}`).join(' and ');
+  return `Working days (not ${weeklyOff.join(', ')}) ${windows}.`;
 }
 
 export function RoutingPage() {
@@ -82,10 +91,11 @@ export function RoutingPage() {
 
   useEffect(() => {
     if (!network || from !== null || to !== null) return;
-    const depots = network.nodes.filter((n) => n.poi?.kind === 'depot');
-    if (depots.length >= 2) {
-      setFrom(depots[0].id);
-      setTo(depots[1].id);
+    const start = network.exits[0];
+    const end = network.nodes.find((n) => n.poi?.kind === 'station') ?? network.nodes.find((n) => n.poi);
+    if (start !== undefined && end && end.id !== start) {
+      setFrom(start);
+      setTo(end.id);
     }
   }, [network, from, to]);
 
@@ -219,7 +229,7 @@ export function RoutingPage() {
               </div>
               {needsWeight && (
                 <Field label="Cargo gross weight (tonnes)" hint="Links with a lower weight limit are avoided.">
-                  <Input type="number" min={0.1} max={60} step={0.5} value={weight} onChange={(e) => setWeight(e.target.value)} />
+                  <Input type="number" min={0.1} max={60} step="any" value={weight} onChange={(e) => setWeight(e.target.value)} />
                 </Field>
               )}
               {error && <p className="rounded-lg bg-red-50 px-3 py-2 text-[13px] text-red-700 ring-1 ring-red-200 ring-inset">{error}</p>}
@@ -378,9 +388,9 @@ function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string;
 }
 
 function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapshot | null }) {
-  const restriction = cargoRestriction(snap);
-  const segments = network.links.filter((l) => l.id < l.reverse);
-  const ring = segments.filter((l) => l.kind === 'ring');
+  const restriction = cargoRestriction(snap, network);
+  const segments = network.links.filter((l) => l.reverse < 0 || l.id < l.reverse);
+  const ring = segments.filter((l) => l.kind === 'highway');
   const ringKm = ring.reduce((a, l) => a + l.length, 0) / 1000;
   const limited = segments.filter((l) => l.maxWeight !== null).sort((a, b) => (a.maxWeight ?? 0) - (b.maxWeight ?? 0));
   let cargo = 0;
@@ -390,10 +400,10 @@ function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapsho
     if (v[3] !== 2) continue;
     cargo++;
     const link = network.links[v[1]];
-    if (link?.kind === 'ring') cargoOnRing++;
+    if (link?.kind === 'highway') cargoOnRing++;
     if (link?.core) cargoInCore++;
   }
-  const kinds = (['ring', 'arterial', 'street', 'lane'] as LinkKind[]).map((kind) => {
+  const kinds = (['highway', 'arterial', 'street', 'lane'] as LinkKind[]).map((kind) => {
     const sample = segments.find((l) => l.kind === kind);
     return { kind, count: segments.filter((l) => l.kind === kind).length, lanes: sample?.lanes ?? 0, speed: sample?.speedLimit ?? 0 };
   });
@@ -403,13 +413,13 @@ function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapsho
       <h2 id="freight-heading" className="text-lg font-semibold tracking-tight text-ink">
         Freight corridors & restrictions
       </h2>
-      <p className="mt-1 text-sm text-muted">Cargo is kept off commuter roads at peak hours and routed along the Ring Road corridor.</p>
+      <p className="mt-1 text-sm text-muted">Cargo is kept out of the town centre at peak hours, off residential lanes and off weight-limited roads, and routed along the highways.</p>
 
       <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
         <Card className="p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium text-muted">Commuter-core restriction</p>
+              <p className="text-[13px] font-medium text-muted">Town-centre freight restriction</p>
               {restriction ? (
                 <p className={clsx('mt-1.5 text-xl font-semibold', restriction.active ? 'text-jam' : 'text-free')}>
                   {restriction.active ? 'In force now' : 'Not in force'}
@@ -423,13 +433,13 @@ function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapsho
             </span>
           </div>
           <p className="mt-2 text-xs text-muted">
-            Weekdays 08:00–11:00 and 17:00–20:00. {restriction ? restriction.next : ''}
+            {restrictionText(network)} {restriction ? restriction.next : ''}
           </p>
         </Card>
         <Card className="p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium text-muted">Ring Road freight corridor</p>
+              <p className="text-[13px] font-medium text-muted">Highway freight corridor</p>
               <p className="tabular mt-1.5 text-xl font-semibold text-ink">{ringKm.toFixed(1)} km</p>
             </div>
             <span className="grid size-10 place-items-center rounded-xl bg-navy-100 text-navy-800">
@@ -437,7 +447,7 @@ function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapsho
             </span>
           </div>
           <p className="mt-2 text-xs text-muted">
-            {ring.length} segments, {ring[0]?.lanes ?? 2} lanes each way at {ring[0]?.speedLimit ?? 60} km/h. Cargo routing favours it over the core.
+            {ring.length} segments on {[...new Set(ring.map((l) => l.road))].slice(0, 3).join(', ')}. Cargo routing favours them over the town centre.
           </p>
         </Card>
         <Card className="p-5">
@@ -451,7 +461,7 @@ function FreightSection({ network, snap }: { network: NetworkInfo; snap: Snapsho
             </span>
           </div>
           <p className="mt-2 text-xs text-muted">
-            {num(cargoOnRing)} on the Ring Road · {num(cargoInCore)} inside the commuter core
+            {num(cargoOnRing)} on highways · {num(cargoInCore)} inside the town centre
           </p>
         </Card>
       </div>
